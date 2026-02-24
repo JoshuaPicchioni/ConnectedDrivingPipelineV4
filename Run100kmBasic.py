@@ -8,26 +8,28 @@ from dask.distributed import Client, LocalCluster
 from MachineLearning.DaskPipelineRunner import DaskPipelineRunner
 import datetime
 
-print('Setting up Dask cluster...')
-cluster = LocalCluster(n_workers=4, threads_per_worker=3, memory_limit='12GB')
-client = Client(cluster)
-print(f'Dask dashboard: {client.dashboard_link}')
 
-config_path = 'production_configs/basic_100km_pipeline_config.json'
-print(f'Config: {config_path}')
-runner = DaskPipelineRunner.from_config(config_path)
-print(f'Pipeline: {runner.pipeline_name}')
-print(f'Start: {datetime.datetime.now()}')
+if __name__ == '__main__':
+    print('Setting up Dask cluster...')
+    cluster = LocalCluster(n_workers=4, threads_per_worker=3, memory_limit='12GB')
+    client = Client(cluster)
+    print(f'Dask dashboard: {client.dashboard_link}')
 
-try:
-    results = runner.run()
-    print(f'\n=== Complete @ {datetime.datetime.now()} ===')
-    for classifier, train_res, test_res in results:
-        print(f'{classifier.__class__.__name__}: Train={train_res[0]:.4f}, Test={test_res[0]:.4f}')
-except Exception as e:
-    print(f'ERROR: {e}')
-    import traceback
-    traceback.print_exc()
-finally:
-    client.close()
-    cluster.close()
+    config_path = 'production_configs/basic_100km_pipeline_config.json'
+    print(f'Config: {config_path}')
+    runner = DaskPipelineRunner.from_config(config_path)
+    print(f'Pipeline: {runner.pipeline_name}')
+    print(f'Start: {datetime.datetime.now()}')
+
+    try:
+        results = runner.run()
+        print(f'\n=== Complete @ {datetime.datetime.now()} ===')
+        for classifier, train_res, test_res in results:
+            print(f'{classifier.__class__.__name__}: Train={train_res[0]:.4f}, Test={test_res[0]:.4f}')
+    except Exception as e:
+        print(f'ERROR: {e}')
+        import traceback
+        traceback.print_exc()
+    finally:
+        client.close()
+        cluster.close()

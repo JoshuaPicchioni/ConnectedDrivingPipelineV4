@@ -1,6 +1,8 @@
 from csv import writer
+import os
 import os.path as path
 import string
+import fcntl
 from typing import List
 
 from EasyMLLib.helper import Helper
@@ -13,12 +15,31 @@ class CSVWriter:
         self.columns = columns
         self.outputpath = outputpath
         Helper().createPath(outputpath)
-        with open(path.join(outputpath, self.name), "a+", newline='') as file:
-                writerObj = writer(file)
-                writerObj.writerow(columns)
+        
+        filepath = path.join(outputpath, self.name)
+        
+        # Only write header if file does not exist or is empty
+        # Use file locking to prevent race conditions in parallel execution
+        write_header = not os.path.exists(filepath) or os.path.getsize(filepath) == 0
+        
+        if write_header:
+            with open(filepath, "w", newline='') as file:
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+                try:
+                    # Double-check after acquiring lock
+                    if file.tell() == 0:
+                        writerObj = writer(file)
+                        writerObj.writerow(columns)
+                finally:
+                    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
     def addRow(self, row: list):
-        with open(path.join(self.outputpath, self.name), "a+", newline='') as file:
-            writerObj = writer(file)
-            writerObj.writerow(row)
+        filepath = path.join(self.outputpath, self.name)
+        with open(filepath, "a", newline='') as file:
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+            try:
+                writerObj = writer(file)
+                writerObj.writerow(row)
+            finally:
+                fcntl.flock(file.fileno(), fcntl.LOCK_UN)

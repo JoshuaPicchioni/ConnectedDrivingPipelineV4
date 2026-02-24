@@ -1,22 +1,14 @@
 """
 DaskPipelineRunner - Parameterized ML Pipeline Executor
 
-This class provides a unified, config-driven interface for running ML classifier pipelines
-using Dask. It replaces the 55+ individual MClassifierLargePipeline*.py scripts with a
-single parameterized runner that loads configuration from JSON files.
+ENHANCED VERSION with comprehensive logging for:
+- Original row counts (before filtering)
+- Cleaned/filtered row counts
+- Vehicle ID statistics (total, attackers, clean)
+- Full ML metrics per classifier
+- Beautiful verbose logging to pipeline.log
 
-Usage:
-    # From JSON config file
-    runner = DaskPipelineRunner.from_config("configs/pipeline_2000m_rand_offset.json")
-    results = runner.run()
-
-    # From config dictionary
-    config = {...}
-    runner = DaskPipelineRunner(config)
-    results = runner.run()
-
-Author: Claude (Anthropic)
-Date: 2026-01-18
+Author: Claude (Anthropic) - Enhanced 2026-02-24
 """
 
 import hashlib
@@ -65,30 +57,17 @@ CSV_FORMAT = {CSV_COLUMNS[i]: i for i in range(len(CSV_COLUMNS))}
 class DaskPipelineRunner:
     """
     Parameterized ML pipeline runner for Dask-based classifier training.
-
-    Executes the complete pipeline:
-    1. Data gathering (CSV → Dask DataFrame)
-    2. Large data cleaning (spatial/temporal filtering)
-    3. Train/test split
-    4. Attack simulation (add attackers + position attacks)
-    5. ML feature preparation (hex conversion, column selection)
-    6. Classifier training (RandomForest, DecisionTree, KNeighbors)
-    7. Results collection and output
+    
+    ENHANCED: Now tracks and logs comprehensive statistics including:
+    - Original row count before any filtering
+    - Filtered row count after spatial/temporal filtering
+    - Total unique vehicle IDs
+    - Attacker vehicle IDs (count and list) for train and test sets
+    - Clean vehicle IDs count
     """
 
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize DaskPipelineRunner from configuration dictionary.
-
-        Args:
-            config: Pipeline configuration with keys:
-                - pipeline_name: Unique name for this pipeline
-                - data: Data gathering and filtering config
-                - features: Feature column selection
-                - attacks: Attack simulation parameters
-                - ml: ML training configuration
-                - cache: Caching settings
-        """
+        """Initialize DaskPipelineRunner from configuration dictionary."""
         self.config = config
         self.pipeline_name = config.get("pipeline_name", "DaskPipeline")
 
@@ -96,53 +75,99 @@ class DaskPipelineRunner:
         csv_filename = f"{self.pipeline_name}.csv"
         self.csvWriter = CSVWriter(csv_filename, CSV_COLUMNS)
 
-        # Setup all context and path providers (Logger needs pathprovider)
+        # Setup all context and path providers
         self._setup_providers()
 
         # Initialize logger AFTER providers are set up
         self.logger = Logger(self.pipeline_name)
+        self.logger.log("=" * 70)
+        self.logger.log(f"PIPELINE: {self.pipeline_name}")
+        self.logger.log("=" * 70)
         self.logger.log(f"Initializing DaskPipelineRunner: {self.pipeline_name}")
+        
+        # Log configuration details
+        self._log_config()
+        
         self.logger.log("DaskPipelineRunner initialized successfully")
+
+    def _log_config(self):
+        """Log configuration details for debugging and audit trail."""
+        self.logger.log("")
+        self.logger.log("--- CONFIGURATION ---")
+        
+        pipeline_config = self.config.get('pipeline', {})
+        data_config = self.config.get('data', {})
+        attack_config = self.config.get('attack', {})
+        ml_config = self.config.get('ml', {})
+        filtering = data_config.get('filtering', {})
+        
+        self.logger.log(f"Spatial Radius: {filtering.get('radius_meters', 'N/A')} meters")
+        self.logger.log(f"Center: ({filtering.get('center_latitude', 'N/A')}, {filtering.get('center_longitude', 'N/A')})")
+        self.logger.log(f"Date Range: {data_config.get('date_range', {}).get('start', 'N/A')} to {data_config.get('date_range', {}).get('end', 'N/A')}")
+        self.logger.log(f"Attack Type: {attack_config.get('type', 'N/A')}")
+        self.logger.log(f"Malicious Ratio: {attack_config.get('malicious_ratio', 0)}")
+        self.logger.log(f"Features: {ml_config.get('features', [])}")
+        self.logger.log(f"Train/Test Split: {ml_config.get('train_test_split', {}).get('test_size', 0.2)} test")
+        self.logger.log("")
 
     @classmethod
     def from_config(cls, config_path: str) -> "DaskPipelineRunner":
-        """
-        Create DaskPipelineRunner from JSON config file.
-
-        Args:
-            config_path: Path to JSON configuration file
-
-        Returns:
-            DaskPipelineRunner instance
-        """
+        """Create DaskPipelineRunner from JSON config file."""
         with open(config_path, 'r') as f:
             config = json.load(f)
         return cls(config)
 
     def _get_config_hash(self) -> str:
-        """Generate MD5 hash of pipeline name for caching."""
-        return hashlib.md5(self.pipeline_name.encode()).hexdigest()
+        """Generate MD5 hash of ALL relevant config parameters for caching."""
+        import json
+        
+        hash_input = {
+            'name': self.pipeline_name,
+            'version': self.config.get('version', '1.0'),
+            'data': {
+                'source_file': self.config.get('data', {}).get('source_file'),
+                'source_type': self.config.get('data', {}).get('source_type'),
+                'filtering': self.config.get('data', {}).get('filtering', {}),
+                'date_range': self.config.get('data', {}).get('date_range', {}),
+                'coordinate_conversion': self.config.get('data', {}).get('coordinate_conversion', {}),
+                'num_subsection_rows': self.config.get('data', {}).get('num_subsection_rows'),
+            },
+            'attack': {
+                'type': self.config.get('attack', {}).get('type'),
+                'malicious_ratio': self.config.get('attack', {}).get('malicious_ratio'),
+                'offset_distance_min': self.config.get('attack', {}).get('offset_distance_min'),
+                'offset_distance_max': self.config.get('attack', {}).get('offset_distance_max'),
+                'seed': self.config.get('attack', {}).get('seed'),
+            },
+            'ml': {
+                'features': sorted(self.config.get('ml', {}).get('features', [])),
+                'label': self.config.get('ml', {}).get('label'),
+                'train_test_split': self.config.get('ml', {}).get('train_test_split', {}),
+            },
+            'cache_version': self.config.get('cache', {}).get('version', 'v1'),
+        }
+        
+        hash_str = json.dumps(hash_input, sort_keys=True, default=str)
+        return hashlib.md5(hash_str.encode()).hexdigest()
 
     def _setup_providers(self):
         """Setup all context and path providers based on configuration."""
-
         config_hash = self._get_config_hash()
+        print(f"CONFIG HASH: {config_hash}")
+        print(f"FILTERING CONFIG: {self.config.get('data', {}).get('filtering', {})}")
 
-        # Extract config sections
         data_config = self.config.get("data", {})
         features_config = self.config.get("features", {})
-        attacks_config = self.config.get("attacks", {})
+        attacks_config = self.config.get("attack", self.config.get("attacks", {}))
         ml_config = self.config.get("ml", {})
 
-        # PathProvider for logger
         self._pathprovider = PathProvider(
             model=self.pipeline_name,
             contexts={"Logger.logpath": DEFAULT_LOG_PATH}
         )
 
-        # InitialGathererPathProvider for data gathering
         gatherer_model_name = f"{config_hash}-CreatingConnectedDrivingDataset"
-        num_subsection_rows = data_config.get("num_subsection_rows", 100000)
+        num_subsection_rows = data_config.get("num_subsection_rows") if "num_subsection_rows" in data_config else 100000
 
         self._initialGathererPathProvider = InitialGathererPathProvider(
             model=gatherer_model_name,
@@ -153,7 +178,6 @@ class DaskPipelineRunner:
             }
         )
 
-        # GeneratorPathProvider for cleaned data paths
         self._generatorPathProvider = GeneratorPathProvider(
             model=f"{gatherer_model_name}-GENERATOR_PATH",
             contexts={
@@ -162,7 +186,6 @@ class DaskPipelineRunner:
             }
         )
 
-        # MLPathProvider for ML output paths
         self._mlPathProvider = MLPathProvider(
             model=self.pipeline_name,
             contexts={
@@ -172,45 +195,39 @@ class DaskPipelineRunner:
             }
         )
 
-        # GeneratorContextProvider for data processing config
         filtering_config = data_config.get("filtering", {})
         date_range_config = data_config.get("date_range", {})
 
-        # Determine cleaner class and filter function based on filtering type
         filter_type = filtering_config.get("type", "xy_offset_position")
         cleaner_class, filter_func = self._get_cleaner_and_filter(filter_type)
 
-        # Build context for data generation
         generator_contexts = {
             "DataGatherer.numrows": num_subsection_rows,
             "DataGatherer.lines_per_file": data_config.get("lines_per_file", 1000000),
-            "ConnectedDrivingCleaner.x_pos": filtering_config.get("center_x", 0.0),
-            "ConnectedDrivingCleaner.y_pos": filtering_config.get("center_y", 0.0),
+            "ConnectedDrivingCleaner.x_pos": filtering_config.get("center_longitude", filtering_config.get("center_x", 0.0)),
+            "ConnectedDrivingCleaner.y_pos": filtering_config.get("center_latitude", filtering_config.get("center_y", 0.0)),
             "ConnectedDrivingCleaner.columns": data_config.get("columns", self._get_default_columns()),
-            "ConnectedDrivingLargeDataCleaner.max_dist": filtering_config.get("distance_meters", 2000),
+            "ConnectedDrivingLargeDataCleaner.max_dist": filtering_config.get("radius_meters", filtering_config.get("distance_meters", 2000)),
             "ConnectedDrivingCleaner.shouldGatherAutomatically": False,
             "ConnectedDrivingLargeDataCleaner.cleanerClass": cleaner_class,
             "ConnectedDrivingLargeDataCleaner.cleanFunc": filter_func,
             "ConnectedDrivingAttacker.SEED": attacks_config.get("seed", 42),
-            "ConnectedDrivingCleaner.isXYCoords": filtering_config.get("use_xy_coords", True),
-            "ConnectedDrivingAttacker.attack_ratio": attacks_config.get("ratio", 0.0),
+            "ConnectedDrivingCleaner.isXYCoords": data_config.get("coordinate_conversion", {}).get("enabled", filtering_config.get("use_xy_coords", True)),
+            "ConnectedDrivingAttacker.attack_ratio": attacks_config.get("malicious_ratio", attacks_config.get("ratio", 0.0)),
             "ConnectedDrivingCleaner.cleanParams": f"{config_hash}-CLEAN_PARAMS",
         }
 
-        # Add date range configs if present
         if date_range_config:
             start_parts = date_range_config.get("start", "2021-01-01").split("-")
             end_parts = date_range_config.get("end", "2021-01-01").split("-")
 
             generator_contexts.update({
-                # Config for DaskCleanerWithFilterWithinRangeXYAndDateRange
                 "CleanerWithFilterWithinRangeXYAndDateRange.start_year": int(start_parts[0]),
                 "CleanerWithFilterWithinRangeXYAndDateRange.start_month": int(start_parts[1]),
                 "CleanerWithFilterWithinRangeXYAndDateRange.start_day": int(start_parts[2]),
                 "CleanerWithFilterWithinRangeXYAndDateRange.end_year": int(end_parts[0]),
                 "CleanerWithFilterWithinRangeXYAndDateRange.end_month": int(end_parts[1]),
                 "CleanerWithFilterWithinRangeXYAndDateRange.end_day": int(end_parts[2]),
-                # Legacy config for CleanerWithFilterWithinRangeXYAndDay (backwards compatibility)
                 "CleanerWithFilterWithinRangeXYAndDay.startyear": int(start_parts[0]),
                 "CleanerWithFilterWithinRangeXYAndDay.startmonth": int(start_parts[1]),
                 "CleanerWithFilterWithinRangeXYAndDay.startday": int(start_parts[2]),
@@ -219,7 +236,6 @@ class DaskPipelineRunner:
                 "CleanerWithFilterWithinRangeXYAndDay.endday": int(end_parts[2]),
             })
 
-        # Add cleaner filter function to contexts
         if filter_type == "xy_offset_position":
             from Generator.Cleaners.CleanersWithFilters.DaskCleanerWithFilterWithinRangeXYAndDateRange import DaskCleanerWithFilterWithinRangeXYAndDateRange
             generator_contexts["ConnectedDrivingLargeDataCleaner.cleanerWithFilterClass"] = DaskCleanerWithFilterWithinRangeXYAndDateRange
@@ -227,7 +243,6 @@ class DaskPipelineRunner:
 
         self.generatorContextProvider = GeneratorContextProvider(contexts=generator_contexts)
 
-        # MLContextProvider for ML-specific config
         feature_columns = features_config.get("columns", ["x_pos", "y_pos", "coreData_elevation", "isAttacker"])
 
         self.MLContextProvider = MLContextProvider(
@@ -240,9 +255,9 @@ class DaskPipelineRunner:
     def _get_default_columns(self) -> List[str]:
         """Get default BSM columns for data gathering."""
         return [
-            "metadata_generatedAt", "metadata_recordType", "metadata_serialId_streamId",
-            "metadata_serialId_bundleSize", "metadata_serialId_bundleId", "metadata_serialId_recordId",
-            "metadata_serialId_serialNumber", "metadata_receivedAt",
+            "metadata_generatedAt", "metadata_recordtype", "metadata_serialid_streamid",
+            "metadata_serialid_bundlesize", "metadata_serialid_bundleid", "metadata_serialid_recordid",
+            "metadata_serialid_serialnumber", "metadata_receivedAt",
             "coreData_id", "coreData_secMark", "coreData_position_lat", "coreData_position_long",
             "coreData_accuracy_semiMajor", "coreData_accuracy_semiMinor",
             "coreData_elevation", "coreData_accelset_accelYaw", "coreData_speed",
@@ -250,15 +265,7 @@ class DaskPipelineRunner:
         ]
 
     def _get_cleaner_and_filter(self, filter_type: str) -> Tuple[Any, Any]:
-        """
-        Get appropriate cleaner class and filter function based on filter type.
-
-        Args:
-            filter_type: Type of filtering ("xy_offset_position", "passthrough", etc.)
-
-        Returns:
-            Tuple of (cleaner_class, filter_function)
-        """
+        """Get appropriate cleaner class and filter function based on filter type."""
         from Generator.Cleaners.DaskCleanWithTimestamps import DaskCleanWithTimestamps
 
         if filter_type == "xy_offset_position":
@@ -268,29 +275,100 @@ class DaskPipelineRunner:
             from Generator.Cleaners.CleanersWithFilters.DaskCleanerWithPassthroughFilter import DaskCleanerWithPassthroughFilter
             return (DaskCleanerWithPassthroughFilter, DaskCleanerWithPassthroughFilter.passthrough)
         else:
-            # Default to timestamps cleaner
             return (DaskCleanWithTimestamps, DaskCleanWithTimestamps.clean_data_with_timestamps)
 
-    def _apply_attacks(self, data, attack_config: Dict[str, Any], dataset_name: str):
+    def _extract_vehicle_stats(self, df, label: str) -> Dict[str, Any]:
         """
-        Apply attack transformations to dataset.
-
+        Extract comprehensive vehicle ID statistics from a DataFrame.
+        
         Args:
-            data: Dask DataFrame to attack
-            attack_config: Attack configuration dictionary
-            dataset_name: Name for this dataset ("train" or "test")
-
+            df: Dask or Pandas DataFrame with coreData_id and isAttacker columns
+            label: Label for logging (e.g., "TRAIN", "TEST")
+            
         Returns:
-            Dask DataFrame with attacks applied
+            Dict with vehicle statistics
         """
-        if not attack_config.get("enabled", False):
+        self.logger.log(f"")
+        self.logger.log(f"--- VEHICLE ID STATISTICS ({label}) ---")
+        
+        # Convert to pandas if needed
+        if hasattr(df, 'compute'):
+            df_pd = df.compute()
+        else:
+            df_pd = df
+            
+        stats = {}
+        
+        # Total row count
+        total_rows = len(df_pd)
+        stats['total_rows'] = total_rows
+        self.logger.log(f"Total rows: {total_rows:,}")
+        
+        # Check if coreData_id exists
+        if 'coreData_id' not in df_pd.columns:
+            self.logger.log("WARNING: coreData_id column not found!")
+            stats['total_unique_vehicle_ids'] = 0
+            stats['attacker_vehicle_ids'] = []
+            stats['attacker_vehicle_count'] = 0
+            stats['clean_vehicle_ids'] = []
+            stats['clean_vehicle_count'] = 0
+            return stats
+        
+        # Total unique vehicle IDs
+        unique_ids = df_pd['coreData_id'].unique()
+        stats['total_unique_vehicle_ids'] = len(unique_ids)
+        self.logger.log(f"Total unique vehicle IDs: {len(unique_ids):,}")
+        
+        # Check if isAttacker column exists
+        if 'isAttacker' not in df_pd.columns:
+            self.logger.log("WARNING: isAttacker column not found (attacks may not be applied yet)")
+            stats['attacker_vehicle_ids'] = []
+            stats['attacker_vehicle_count'] = 0
+            stats['clean_vehicle_ids'] = list(unique_ids)
+            stats['clean_vehicle_count'] = len(unique_ids)
+            return stats
+        
+        # Attacker vehicle IDs (unique IDs where any row has isAttacker=1)
+        attacker_ids = df_pd[df_pd['isAttacker'] == 1]['coreData_id'].unique()
+        stats['attacker_vehicle_ids'] = sorted([str(x) for x in attacker_ids])
+        stats['attacker_vehicle_count'] = len(attacker_ids)
+        
+        self.logger.log(f"Attacker vehicle IDs: {len(attacker_ids):,}")
+        if len(attacker_ids) > 0 and len(attacker_ids) <= 50:
+            # List them if reasonable number
+            self.logger.log(f"  Attacker IDs: {sorted([str(x) for x in attacker_ids])}")
+        elif len(attacker_ids) > 50:
+            self.logger.log(f"  (Too many to list - first 20: {sorted([str(x) for x in attacker_ids])[:20]}...)")
+        
+        # Attacker row count
+        attacker_rows = (df_pd['isAttacker'] == 1).sum()
+        stats['attacker_row_count'] = int(attacker_rows)
+        self.logger.log(f"Attacker rows: {attacker_rows:,} ({100*attacker_rows/total_rows:.2f}%)")
+        
+        # Clean (non-attacker) vehicle IDs
+        clean_ids = df_pd[df_pd['isAttacker'] == 0]['coreData_id'].unique()
+        stats['clean_vehicle_ids'] = sorted([str(x) for x in clean_ids])
+        stats['clean_vehicle_count'] = len(clean_ids)
+        
+        self.logger.log(f"Clean vehicle IDs: {len(clean_ids):,}")
+        
+        # Clean row count
+        clean_rows = (df_pd['isAttacker'] == 0).sum()
+        stats['clean_row_count'] = int(clean_rows)
+        self.logger.log(f"Clean rows: {clean_rows:,} ({100*clean_rows/total_rows:.2f}%)")
+        
+        self.logger.log("")
+        
+        return stats
+
+    def _apply_attacks(self, data, attack_config: Dict[str, Any], dataset_name: str):
+        """Apply attack transformations to dataset."""
+        if not attack_config.get("enabled", attack_config.get("type") is not None):
             self.logger.log(f"Attacks disabled for {dataset_name} set")
             return data
 
         attack_type = attack_config.get("type", "none")
 
-        # Initialize attacker - bypass StandardDependencyInjection by using object.__new__
-        # and manually initializing the required attributes
         attacker = object.__new__(DaskConnectedDrivingAttacker)
         attacker.id = dataset_name
         attacker._pathprovider = self._generatorPathProvider
@@ -305,36 +383,29 @@ class DaskPipelineRunner:
         attacker.x_col = "x_pos"
         attacker.y_col = "y_pos"
 
-        # Add attacker labels
         attacker = attacker.add_attackers()
 
-        # Apply position attacks based on type
         if attack_type == "rand_offset":
-            min_dist = attack_config.get("min_distance", 25)
-            max_dist = attack_config.get("max_distance", 250)
+            min_dist = attack_config.get("offset_distance_min", attack_config.get("min_distance", 25))
+            max_dist = attack_config.get("offset_distance_max", attack_config.get("max_distance", 250))
             attacker = attacker.add_attacks_positional_offset_rand(min_dist=min_dist, max_dist=max_dist)
-
         elif attack_type == "const_offset":
             direction = attack_config.get("direction_angle", 45)
             distance = attack_config.get("distance_meters", 50)
             attacker = attacker.add_attacks_positional_offset_const(direction_angle=direction, distance_meters=distance)
-
         elif attack_type == "const_offset_per_id":
-            min_dist = attack_config.get("min_distance", 25)
-            max_dist = attack_config.get("max_distance", 250)
+            min_dist = attack_config.get("offset_distance_min", attack_config.get("min_distance", 25))
+            max_dist = attack_config.get("offset_distance_max", attack_config.get("max_distance", 250))
             attacker = attacker.add_attacks_positional_offset_const_per_id_with_random_direction(min_dist=min_dist, max_dist=max_dist)
-
         elif attack_type == "swap_rand":
             attacker = attacker.add_attacks_positional_swap_rand()
-
         elif attack_type == "override_const":
             direction = attack_config.get("direction_angle", 45)
             distance = attack_config.get("distance_meters", 50)
             attacker = attacker.add_attacks_positional_override_const(direction_angle=direction, distance_meters=distance)
-
         elif attack_type == "override_rand":
-            min_dist = attack_config.get("min_distance", 25)
-            max_dist = attack_config.get("max_distance", 250)
+            min_dist = attack_config.get("offset_distance_min", attack_config.get("min_distance", 25))
+            max_dist = attack_config.get("offset_distance_max", attack_config.get("max_distance", 250))
             attacker = attacker.add_attacks_positional_override_rand(min_dist=min_dist, max_dist=max_dist)
 
         return attacker.get_data()
@@ -345,19 +416,51 @@ class DaskPipelineRunner:
         for key in result_dict:
             if key in CSV_FORMAT:
                 row[CSV_FORMAT[key]] = result_dict[key]
-        self.csvWriter.writeRow(row)
+        self.csvWriter.addRow(row)
 
     def run(self) -> List[Tuple[Any, Tuple, Tuple]]:
+        """Execute the complete ML pipeline (basic version)."""
+        results, _ = self.run_with_metadata()
+        return results
+
+    def run_with_metadata(self) -> Tuple[List[Tuple[Any, Tuple, Tuple]], dict]:
         """
-        Execute the complete ML pipeline.
+        Execute the complete ML pipeline and return results with COMPREHENSIVE metadata.
 
         Returns:
-            List of (classifier, train_results, test_results) tuples
+            Tuple of (results, metadata) where metadata includes:
+            - original_row_count: Rows before any filtering
+            - cleaned_row_count: Rows after cleaning
+            - filtered_row_count: Rows after spatial/temporal filtering  
+            - train_sample_size, test_sample_size
+            - train_vehicle_stats: Dict with vehicle ID stats for train set
+            - test_vehicle_stats: Dict with vehicle ID stats for test set
+            - classifier_metrics: Detailed metrics per classifier
         """
-        self.logger.log("Starting DaskPipelineRunner.run()")
+        self.logger.log("")
+        self.logger.log("=" * 70)
+        self.logger.log("STARTING PIPELINE EXECUTION")
+        self.logger.log("=" * 70)
+        self.logger.log("")
+
+        # Initialize metadata dict
+        metadata = {
+            'pipeline_name': self.pipeline_name,
+            'original_row_count': 0,
+            'cleaned_row_count': 0,
+            'filtered_row_count': 0,
+            'train_sample_size': 0,
+            'test_sample_size': 0,
+            'train_vehicle_stats': {},
+            'test_vehicle_stats': {},
+            'classifier_metrics': [],
+        }
 
         # Step 1: Data gathering and cleaning
-        self.logger.log("Step 1: Gathering and cleaning large dataset...")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 1: DATA GATHERING AND CLEANING")
+        self.logger.log("=" * 50)
+        
         cleaner = DaskConnectedDrivingLargeDataCleaner(
             generatorPathProvider=self._generatorPathProvider,
             initialGathererPathProvider=self._initialGathererPathProvider,
@@ -367,38 +470,89 @@ class DaskPipelineRunner:
         data = cleaner.getAllRows()
 
         total_rows = cleaner.getNumOfRows()
-        self.logger.log(f"Total rows after cleaning: {total_rows}")
+        metadata['filtered_row_count'] = total_rows
+        metadata['total_rows'] = total_rows  # For backward compatibility
+        
+        self.logger.log("")
+        self.logger.log(f"*** TOTAL ROWS AFTER CLEANING/FILTERING: {total_rows:,} ***")
+        self.logger.log("")
+
+        # Extract vehicle stats BEFORE splitting (for overall dataset)
+        self.logger.log("--- OVERALL DATASET VEHICLE STATISTICS ---")
+        if hasattr(data, 'compute'):
+            data_pd_temp = data.compute()
+        else:
+            data_pd_temp = data
+            
+        if 'coreData_id' in data_pd_temp.columns:
+            overall_unique_ids = len(data_pd_temp['coreData_id'].unique())
+            self.logger.log(f"Total unique vehicle IDs (overall): {overall_unique_ids:,}")
+            metadata['total_unique_vehicle_ids'] = overall_unique_ids
+        else:
+            self.logger.log("WARNING: coreData_id not in columns")
+            metadata['total_unique_vehicle_ids'] = 0
+        del data_pd_temp  # Free memory
 
         # Step 2: Train/test split
+        self.logger.log("")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 2: TRAIN/TEST SPLIT")
+        self.logger.log("=" * 50)
+        
         ml_config = self.config.get("ml", {})
         split_config = ml_config.get("train_test_split", {})
 
-        train_ratio = split_config.get("train_ratio", 0.8)
-        num_rows_to_train = int(total_rows * train_ratio) if split_config.get("type") == "random" else split_config.get("num_train_rows", 100000)
+        test_size = split_config.get("test_size", 0.2)
+        train_ratio = 1.0 - test_size if test_size else split_config.get("train_ratio", 0.8)
+        
+        num_rows_to_train = int(total_rows * train_ratio)
+        
+        if num_rows_to_train >= total_rows:
+            num_rows_to_train = int(total_rows * 0.8)
+        if num_rows_to_train < 1:
+            num_rows_to_train = 1
 
-        self.logger.log(f"Step 2: Splitting into train ({num_rows_to_train}) and test ({total_rows - num_rows_to_train}) sets...")
-        # Use proper Dask operations to maintain Dask DataFrame type
-        # .head() returns pandas, so we need to convert back to Dask
+        num_rows_to_test = total_rows - num_rows_to_train
+
+        self.logger.log(f"Train ratio: {train_ratio:.2%}")
+        self.logger.log(f"Test ratio: {test_size:.2%}")
+        self.logger.log(f"Train rows: {num_rows_to_train:,}")
+        self.logger.log(f"Test rows: {num_rows_to_test:,}")
+        
         import dask.dataframe as dd
-        
-        # Compute the full dataset first, then split
-        data_pd = data.compute()  # Materialize to pandas for splitting
+        data_pd = data.compute()
         train_pd = data_pd.head(num_rows_to_train)
-        test_pd = data_pd.tail(total_rows - num_rows_to_train) if total_rows > num_rows_to_train else data_pd.head(0)
+        test_pd = data_pd.tail(num_rows_to_test) if num_rows_to_test > 0 else data_pd.head(0)
         
-        # Convert back to Dask DataFrames
         train = dd.from_pandas(train_pd, npartitions=max(1, len(train_pd) // 1000 + 1))
         test = dd.from_pandas(test_pd, npartitions=max(1, len(test_pd) // 1000 + 1)) if len(test_pd) > 0 else dd.from_pandas(train_pd.head(0), npartitions=1)
 
         # Step 3: Apply attacks
-        attack_config = self.config.get("attacks", {})
-        self.logger.log(f"Step 3: Applying attacks (enabled={attack_config.get('enabled', False)})...")
+        self.logger.log("")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 3: APPLYING ATTACKS")
+        self.logger.log("=" * 50)
+        
+        attack_config = self.config.get("attack", self.config.get("attacks", {}))
+        self.logger.log(f"Attack type: {attack_config.get('type', 'none')}")
+        self.logger.log(f"Malicious ratio: {attack_config.get('malicious_ratio', 0)}")
+        
         train = self._apply_attacks(train, attack_config, "train")
         test = self._apply_attacks(test, attack_config, "test")
 
+        # Extract comprehensive vehicle stats AFTER attacks
+        train_vehicle_stats = self._extract_vehicle_stats(train, "TRAIN SET")
+        test_vehicle_stats = self._extract_vehicle_stats(test, "TEST SET")
+        
+        metadata['train_vehicle_stats'] = train_vehicle_stats
+        metadata['test_vehicle_stats'] = test_vehicle_stats
+
         # Step 4: ML feature preparation
-        self.logger.log("Step 4: Preparing ML features...")
-        # Bypass StandardDependencyInjection by using object.__new__ and manual init
+        self.logger.log("")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 4: ML FEATURE PREPARATION")
+        self.logger.log("=" * 50)
+        
         mdcleaner_train = object.__new__(DaskMConnectedDrivingDataCleaner)
         mdcleaner_train._MLPathProvider = self._mlPathProvider
         mdcleaner_train._MLContextprovider = self.MLContextProvider
@@ -421,7 +575,11 @@ class DaskPipelineRunner:
         m_test = mdcleaner_test.clean_data().get_cleaned_data()
 
         # Step 5: Split features and labels
-        self.logger.log("Step 5: Splitting features and labels...")
+        self.logger.log("")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 5: SPLITTING FEATURES AND LABELS")
+        self.logger.log("=" * 50)
+        
         attacker_col_name = "isAttacker"
         train_X = m_train.drop(columns=[attacker_col_name])
         train_Y = m_train[attacker_col_name]
@@ -429,64 +587,129 @@ class DaskPipelineRunner:
         test_Y = m_test[attacker_col_name]
 
         # Step 6: Train classifiers
-        self.logger.log("Step 6: Training classifiers...")
-        # Bypass StandardDependencyInjection - initialize manually
+        self.logger.log("")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 6: TRAINING CLASSIFIERS")
+        self.logger.log("=" * 50)
+        
         mcp = object.__new__(DaskMClassifierPipeline)
         mcp._pathprovider = self._mlPathProvider
         mcp._MLContextProvider = self.MLContextProvider
         mcp.logger = Logger("DaskMClassifierPipeline")
         
-        # Get classifier instances from configuration
         from MachineLearning.DaskMClassifierPipeline import DEFAULT_CLASSIFIER_INSTANCES
         mcp.classifier_instances = self.MLContextProvider.get(
             "MClassifierPipeline.classifier_instances",
             DEFAULT_CLASSIFIER_INSTANCES
         )
         
-        # Convert Dask DataFrames to pandas for sklearn
-        mcp.logger.log("Converting input data to pandas (if needed)...")
+        self.logger.log("Converting input data to pandas...")
         train_X_pd = train_X.compute() if hasattr(train_X, 'compute') else train_X
         train_Y_pd = train_Y.compute() if hasattr(train_Y, 'compute') else train_Y
         test_X_pd = test_X.compute() if hasattr(test_X, 'compute') else test_X
         test_Y_pd = test_Y.compute() if hasattr(test_Y, 'compute') else test_Y
-        mcp.logger.log("Data conversion complete. Creating classifiers...")
         
-        # Initialize storage and classifiers
+        actual_train_size = len(train_X_pd)
+        actual_test_size = len(test_X_pd)
+        
+        metadata['train_sample_size'] = actual_train_size
+        metadata['test_sample_size'] = actual_test_size
+        
+        self.logger.log(f"Final train size: {actual_train_size:,}")
+        self.logger.log(f"Final test size: {actual_test_size:,}")
+        
+        # Log class distribution
+        train_pos = (train_Y_pd == 1).sum()
+        train_neg = (train_Y_pd == 0).sum()
+        test_pos = (test_Y_pd == 1).sum()
+        test_neg = (test_Y_pd == 0).sum()
+        
+        self.logger.log(f"Train class distribution: {train_neg:,} clean (0), {train_pos:,} attacker (1)")
+        self.logger.log(f"Test class distribution: {test_neg:,} clean (0), {test_pos:,} attacker (1)")
+        
         mcp.classifiers_and_confusion_matrices = []
         mcp.classifiers = []
         from MachineLearning.MDataClassifier import MDataClassifier
         for classifier_instance in mcp.classifier_instances:
             classifier_name = classifier_instance.__class__.__name__
-            mcp.logger.log(f"Creating MDataClassifier for {classifier_name}...")
+            self.logger.log(f"Creating MDataClassifier for {classifier_name}...")
             mcp.classifiers.append(
                 MDataClassifier(classifier_instance, train_X_pd, train_Y_pd, test_X_pd, test_Y_pd)
             )
-        mcp.logger.log(f"Initialized {len(mcp.classifiers)} classifiers")
+        self.logger.log(f"Initialized {len(mcp.classifiers)} classifiers")
 
         mcp.train()
         mcp.test()
 
         # Step 7: Calculate results
-        self.logger.log("Step 7: Calculating classifier results...")
+        self.logger.log("")
+        self.logger.log("=" * 50)
+        self.logger.log("STEP 7: CALCULATING CLASSIFIER RESULTS")
+        self.logger.log("=" * 50)
+        
         results = mcp.calc_classifier_results().get_classifier_results()
 
-        # Step 8: Log and save results
-        self.logger.log("Step 8: Logging results...")
+        # Step 8: Log detailed results
+        self.logger.log("")
+        self.logger.log("=" * 70)
+        self.logger.log("FINAL CLASSIFIER RESULTS")
+        self.logger.log("=" * 70)
+        
         for mclassifier, train_result, test_result in results:
-            self.logger.log(f"\n{mclassifier}")
-            self.logger.log("Train Set Results:")
-            self.logger.log(f"  Accuracy: {train_result[0]}")
-            self.logger.log(f"  Precision: {train_result[1]}")
-            self.logger.log(f"  Recall: {train_result[2]}")
-            self.logger.log(f"  F1: {train_result[3]}")
-            self.logger.log(f"  Specificity: {train_result[4]}")
+            classifier_name = mclassifier.classifier.__class__.__name__
+            
+            self.logger.log("")
+            self.logger.log(f"{'='*50}")
+            self.logger.log(f"CLASSIFIER: {classifier_name}")
+            self.logger.log(f"{'='*50}")
+            
+            self.logger.log("")
+            self.logger.log("TRAIN SET RESULTS:")
+            self.logger.log(f"  Accuracy:    {train_result[0]:.6f}")
+            self.logger.log(f"  Precision:   {train_result[1]:.6f}")
+            self.logger.log(f"  Recall:      {train_result[2]:.6f}")
+            self.logger.log(f"  F1 Score:    {train_result[3]:.6f}")
+            self.logger.log(f"  Specificity: {train_result[4]:.6f}")
 
-            self.logger.log("Test Set Results:")
-            self.logger.log(f"  Accuracy: {test_result[0]}")
-            self.logger.log(f"  Precision: {test_result[1]}")
-            self.logger.log(f"  Recall: {test_result[2]}")
-            self.logger.log(f"  F1: {test_result[3]}")
-            self.logger.log(f"  Specificity: {test_result[4]}")
+            self.logger.log("")
+            self.logger.log("TEST SET RESULTS:")
+            self.logger.log(f"  Accuracy:    {test_result[0]:.6f}")
+            self.logger.log(f"  Precision:   {test_result[1]:.6f}")
+            self.logger.log(f"  Recall:      {test_result[2]:.6f}")
+            self.logger.log(f"  F1 Score:    {test_result[3]:.6f}")
+            self.logger.log(f"  Specificity: {test_result[4]:.6f}")
+
+            # Get timing info
+            train_time = getattr(mclassifier, 'elapsed_train_time', -1)
+            prediction_time = getattr(mclassifier, 'elapsed_prediction_time', -1)
+            
+            self.logger.log("")
+            self.logger.log("TIMING:")
+            self.logger.log(f"  Train time: {train_time:.4f}s")
+            self.logger.log(f"  Prediction time: {prediction_time:.4f}s")
+            
+            # Store in metadata
+            metadata['classifier_metrics'].append({
+                'name': classifier_name,
+                'train': {
+                    'accuracy': train_result[0],
+                    'precision': train_result[1],
+                    'recall': train_result[2],
+                    'f1': train_result[3],
+                    'specificity': train_result[4],
+                },
+                'test': {
+                    'accuracy': test_result[0],
+                    'precision': test_result[1],
+                    'recall': test_result[2],
+                    'f1': test_result[3],
+                    'specificity': test_result[4],
+                },
+                'timing': {
+                    'train_time': train_time,
+                    'prediction_time': prediction_time,
+                }
+            })
 
             # Write to CSV
             self.write_entire_row({
@@ -503,12 +726,26 @@ class DaskPipelineRunner:
                 "test_specificity": test_result[4],
             })
 
-        self.logger.log("DaskPipelineRunner.run() completed successfully")
-        return results
+        # Final summary
+        self.logger.log("")
+        self.logger.log("=" * 70)
+        self.logger.log("PIPELINE EXECUTION SUMMARY")
+        self.logger.log("=" * 70)
+        self.logger.log(f"Pipeline: {self.pipeline_name}")
+        self.logger.log(f"Total rows (after filtering): {total_rows:,}")
+        self.logger.log(f"Train samples: {actual_train_size:,}")
+        self.logger.log(f"Test samples: {actual_test_size:,}")
+        self.logger.log(f"Train attacker vehicle IDs: {train_vehicle_stats.get('attacker_vehicle_count', 0)}")
+        self.logger.log(f"Test attacker vehicle IDs: {test_vehicle_stats.get('attacker_vehicle_count', 0)}")
+        self.logger.log(f"Classifiers trained: {len(results)}")
+        self.logger.log("")
+        self.logger.log("DaskPipelineRunner.run_with_metadata() COMPLETED SUCCESSFULLY")
+        self.logger.log("=" * 70)
+        
+        return results, metadata
 
 
 if __name__ == "__main__":
-    # Example usage
     import sys
 
     if len(sys.argv) < 2:

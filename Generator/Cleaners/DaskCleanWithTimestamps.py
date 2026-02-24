@@ -123,9 +123,9 @@ class DaskCleanWithTimestamps(DaskConnectedDrivingCleaner):
         self.cleaned_data = self.cleaned_data.dropna()
 
         # OPTIMIZATION: Convert low-cardinality string columns to categorical
-        if 'metadata_recordType' in self.cleaned_data.columns:
+        if 'metadata_recordtype' in self.cleaned_data.columns:
             self.cleaned_data = self.cleaned_data.assign(
-                metadata_recordType=self.cleaned_data['metadata_recordType'].astype('category')
+                metadata_recordtype=self.cleaned_data['metadata_recordtype'].astype('category')
             )
 
         # Step 3: Parse WKT POINT to extract x_pos and y_pos

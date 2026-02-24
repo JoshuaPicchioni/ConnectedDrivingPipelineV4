@@ -107,8 +107,8 @@ class DaskSessionManager:
                 memory_limit=memory_limit,
 
                 # Scheduler options
-                scheduler_port=8786,
-                dashboard_address=':8787',
+                scheduler_port=0,
+                dashboard_address=':0',
 
                 # Silence excessive logs
                 silence_logs=logging.ERROR

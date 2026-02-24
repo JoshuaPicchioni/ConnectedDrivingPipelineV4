@@ -190,30 +190,27 @@ class SparkConnectedDrivingCleaner(IConnectedDrivingCleaner):
         Returns:
             self: For method chaining
         """
-        # Replicate EXACT pandas logic for x_pos conversion
-        # dist_between_two_points(lat1, lon1, lat2, lon2)
-        # Pandas: MathHelper.dist_between_two_points(x, self.y_pos, self.x_pos, self.y_pos)
-        # where x = current x_pos (longitude)
+        # FIXED: x_pos = distance EAST (same lat, different lon)
+        # geodesic_distance(ref_lat, current_lon, ref_lat, ref_lon)
         self.cleaned_data = self.cleaned_data.withColumn(
             "x_pos",
             geodesic_distance_udf(
-                col("x_pos"),           # lat1 (actually longitude, but pandas passes it here)
-                lit(self.y_pos),        # lon1 (origin longitude)
-                lit(self.x_pos),        # lat2 (origin latitude)
-                lit(self.y_pos)         # lon2 (origin longitude)
+                lit(self.y_pos),        # lat1 = ref_lat (center_latitude)
+                col("x_pos"),           # lon1 = current_lon
+                lit(self.y_pos),        # lat2 = ref_lat (center_latitude)
+                lit(self.x_pos)         # lon2 = ref_lon (center_longitude)
             )
         )
 
-        # Replicate EXACT pandas logic for y_pos conversion
-        # Pandas: MathHelper.dist_between_two_points(self.x_pos, y, self.x_pos, self.y_pos)
-        # where y = current y_pos (latitude)
+        # FIXED: y_pos = distance NORTH (different lat, same lon)
+        # geodesic_distance(current_lat, ref_lon, ref_lat, ref_lon)
         self.cleaned_data = self.cleaned_data.withColumn(
             "y_pos",
             geodesic_distance_udf(
-                lit(self.x_pos),        # lat1 (origin latitude)
-                col("y_pos"),           # lon1 (actually latitude, but pandas passes it here)
-                lit(self.x_pos),        # lat2 (origin latitude)
-                lit(self.y_pos)         # lon2 (origin longitude)
+                col("y_pos"),           # lat1 = current_lat
+                lit(self.x_pos),        # lon1 = ref_lon (center_longitude)
+                lit(self.y_pos),        # lat2 = ref_lat (center_latitude)
+                lit(self.x_pos)         # lon2 = ref_lon (center_longitude)
             )
         )
 

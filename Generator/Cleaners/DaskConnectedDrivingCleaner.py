@@ -152,10 +152,10 @@ class DaskConnectedDrivingCleaner(IConnectedDrivingCleaner):
 
         # OPTIMIZATION: Convert low-cardinality string columns to categorical
         # This reduces memory usage by 90%+ for columns with few unique values
-        # metadata_recordType is typically always 'BSM', saving ~600+ KB per 100k rows
-        if 'metadata_recordType' in self.cleaned_data.columns:
+        # metadata_recordtype is typically always 'BSM', saving ~600+ KB per 100k rows
+        if 'metadata_recordtype' in self.cleaned_data.columns:
             self.cleaned_data = self.cleaned_data.assign(
-                metadata_recordType=self.cleaned_data['metadata_recordType'].astype('category')
+                metadata_recordtype=self.cleaned_data['metadata_recordtype'].astype('category')
             )
 
         # Step 3: Parse coreData_position (WKT POINT) to x_pos and y_pos
@@ -214,17 +214,34 @@ class DaskConnectedDrivingCleaner(IConnectedDrivingCleaner):
         def _convert_xy_coords_partition(partition: pd.DataFrame) -> pd.DataFrame:
             """
             Convert x_pos and y_pos to geodesic distances in a single partition pass.
-
-            This inner function replicates the exact pandas logic for both conversions.
+            
+            FIXED BUG: Previous code had incorrect parameter order for geodesic_distance().
+            geodesic_distance expects (lat1, lon1, lat2, lon2).
+            
+            After POINT parsing:
+              - x_pos contains LONGITUDE (x = current_lon)
+              - y_pos contains LATITUDE (y = current_lat)
+            
+            Config variables (confusingly named):
+              - self.x_pos = center_longitude (ref_lon)
+              - self.y_pos = center_latitude (ref_lat)
+            
+            For x_pos (distance EAST, same latitude):
+              geodesic_distance(ref_lat, current_lon, ref_lat, ref_lon)
+            
+            For y_pos (distance NORTH, same longitude):
+              geodesic_distance(current_lat, ref_lon, ref_lat, ref_lon)
             """
-            # x_pos conversion: geodesic_distance(x, self.y_pos, self.x_pos, self.y_pos)
+            # x_pos conversion: distance EAST from reference (same latitude, different longitude)
+            # geodesic_distance(ref_lat, current_lon, ref_lat, ref_lon)
             partition['x_pos'] = partition['x_pos'].apply(
-                lambda x: geodesic_distance(x, self.y_pos, self.x_pos, self.y_pos)
+                lambda x: geodesic_distance(self.y_pos, x, self.y_pos, self.x_pos)
             )
 
-            # y_pos conversion: geodesic_distance(self.x_pos, y, self.x_pos, self.y_pos)
+            # y_pos conversion: distance NORTH from reference (different latitude, same longitude)
+            # geodesic_distance(current_lat, ref_lon, ref_lat, ref_lon)
             partition['y_pos'] = partition['y_pos'].apply(
-                lambda y: geodesic_distance(self.x_pos, y, self.x_pos, self.y_pos)
+                lambda y: geodesic_distance(y, self.x_pos, self.y_pos, self.x_pos)
             )
 
             return partition

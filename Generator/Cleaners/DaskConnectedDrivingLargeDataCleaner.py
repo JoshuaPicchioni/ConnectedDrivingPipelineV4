@@ -165,6 +165,7 @@ class DaskConnectedDrivingLargeDataCleaner:
             self: For method chaining
         """
         # Check if cleaned data already exists
+        self.logger.log(f"CHECKING PATH: {self.combinedcleandatapath}")
         if path.exists(self.combinedcleandatapath) and self._is_valid_parquet_directory(self.combinedcleandatapath):
             self.logger.log("Found cleaned data! Skipping regeneration.")
             return self
@@ -251,6 +252,7 @@ class DaskConnectedDrivingLargeDataCleaner:
             self: For method chaining
         """
         # Check if combined data already exists
+        self.logger.log(f"CHECKING PATH: {self.combinedcleandatapath}")
         if path.exists(self.combinedcleandatapath) and self._is_valid_parquet_directory(self.combinedcleandatapath):
             self.logger.log("Found combined data file! No combining needed (Parquet is already partitioned).")
             return self
