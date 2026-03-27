@@ -118,7 +118,7 @@ def run_single_pipeline(config_path, cluster_client):
         with capture_output() as (stdout_cap, stderr_cap):
             # CRITICAL: Clear singletons before each pipeline to avoid state contamination
             from ClassTypes.SingletonABCMeta import SingletonABCMeta
-            SingletonABCMeta.clear()
+            SingletonABCMeta._instances.clear()
             runner = DaskPipelineRunner.from_config(config_path)
             results = runner.run()
         
