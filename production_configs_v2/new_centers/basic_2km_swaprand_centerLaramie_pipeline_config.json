@@ -1,0 +1,86 @@
+{
+  "pipeline_name": "basic_2km_swaprand_centerLaramie",
+  "version": "2.0.0",
+  "created": "2026-03-26",
+  "template_generated": true,
+  "template_parameters": {
+    "spatial_radius": "2km",
+    "feature_set": "BASIC",
+    "attack_type": "swap_rand",
+    "with_vehicle_id": false,
+    "malicious_ratio": 0.3,
+    "center_point": "Laramie",
+    "center_lat": 41.31,
+    "center_lon": -105.6
+  },
+  "data": {
+    "source_file": "April_2021_Wyoming_Data_Fixed.parquet",
+    "source_type": "parquet",
+    "columns_to_extract": [
+      "metadata_receivedAt",
+      "coreData_position_lat",
+      "coreData_position_long",
+      "coreData_elevation"
+    ],
+    "num_subsection_rows": null,
+    "filtering": {
+      "center_longitude": -105.6,
+      "center_latitude": 41.31,
+      "radius_meters": 2000
+    },
+    "date_range": {
+      "start": "2021-04-01",
+      "end": "2021-04-30"
+    },
+    "coordinate_conversion": {
+      "enabled": true,
+      "method": "local_projection",
+      "output_columns": [
+        "x_pos",
+        "y_pos"
+      ]
+    }
+  },
+  "attack": {
+    "malicious_ratio": 0.3,
+    "label_column": "isAttacker",
+    "seed": 42,
+    "type": "swap_rand"
+  },
+  "ml": {
+    "features": [
+      "x_pos",
+      "y_pos",
+      "coreData_elevation"
+    ],
+    "label": "isAttacker",
+    "train_test_split": {
+      "test_size": 0.2,
+      "random_state": 42,
+      "shuffle": true,
+      "type": "random",
+      "train_ratio": 0.8
+    },
+    "classifiers": [
+      "RandomForest",
+      "DecisionTree",
+      "KNeighbors"
+    ]
+  },
+  "cache": {
+    "enabled": true,
+    "version": "v3",
+    "clean_dataset": "cache/matrix/basic_2km_swaprand_centerLaramie/clean.parquet",
+    "attack_dataset": "cache/matrix/basic_2km_swaprand_centerLaramie/attack.parquet"
+  },
+  "output": {
+    "results_dir": "results/matrix/basic_2km_swaprand_centerLaramie/",
+    "log_dir": "logs/"
+  },
+  "dask": {
+    "n_workers": 4,
+    "threads_per_worker": 2,
+    "memory_limit": "12GB",
+    "dashboard_address": ":0"
+  }
+}
