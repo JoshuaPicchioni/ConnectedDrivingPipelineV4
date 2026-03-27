@@ -520,9 +520,23 @@ class DaskPipelineRunner:
         self.logger.log(f"Test rows: {num_rows_to_test:,}")
         
         import dask.dataframe as dd
+        from sklearn.model_selection import train_test_split as sklearn_split
         data_pd = data.compute()
-        train_pd = data_pd.head(num_rows_to_train)
-        test_pd = data_pd.tail(num_rows_to_test) if num_rows_to_test > 0 else data_pd.head(0)
+        
+        # Use sklearn train_test_split with shuffle for proper randomization
+        label_col = ml_config.get("label", "isAttacker")
+        if label_col in data_pd.columns and data_pd[label_col].nunique() > 1:
+            train_pd, test_pd = sklearn_split(
+                data_pd, test_size=test_size, random_state=42, 
+                shuffle=True, stratify=data_pd[label_col]
+            )
+        else:
+            # Fallback without stratify if label column missing or single class
+            train_pd, test_pd = sklearn_split(
+                data_pd, test_size=test_size, random_state=42, shuffle=True
+            )
+        
+        self.logger.log(f"Train/test split: shuffle=True, random_state=42, stratified={label_col in data_pd.columns}")
         
         train = dd.from_pandas(train_pd, npartitions=max(1, len(train_pd) // 1000 + 1))
         test = dd.from_pandas(test_pd, npartitions=max(1, len(test_pd) // 1000 + 1)) if len(test_pd) > 0 else dd.from_pandas(train_pd.head(0), npartitions=1)
