@@ -16,6 +16,7 @@ import json
 import os
 from typing import Dict, List, Any, Optional, Tuple
 from pandas import DataFrame
+from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
@@ -612,10 +613,12 @@ class DaskPipelineRunner:
         mcp.logger = Logger("DaskMClassifierPipeline")
         
         from MachineLearning.DaskMClassifierPipeline import DEFAULT_CLASSIFIER_INSTANCES
-        mcp.classifier_instances = self.MLContextProvider.get(
+        base_instances = self.MLContextProvider.get(
             "MClassifierPipeline.classifier_instances",
             DEFAULT_CLASSIFIER_INSTANCES
         )
+        # CRITICAL: clone() each classifier to avoid shared state between pipeline runs
+        mcp.classifier_instances = [clone(clf) for clf in base_instances]
         
         self.logger.log("Converting input data to pandas...")
         train_X_pd = train_X.compute() if hasattr(train_X, 'compute') else train_X

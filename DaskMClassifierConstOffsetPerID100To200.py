@@ -184,7 +184,7 @@ class DaskMClassifierConstOffsetPerID100To200:
             "ConnectedDrivingCleaner.x_pos": x_pos,
             "ConnectedDrivingCleaner.y_pos": y_pos,
             "ConnectedDrivingCleaner.columns": COLUMNS,
-            "ConnectedDrivingLargeDataCleaner.max_dist": 2000,
+            "ConnectedDrivingLargeDataCleaner.max_dist": 100000,
             "ConnectedDrivingCleaner.shouldGatherAutomatically": False,
             "ConnectedDrivingLargeDataCleaner.cleanerClass": DaskCleanWithTimestamps,
             "ConnectedDrivingLargeDataCleaner.cleanFunc": DaskCleanWithTimestamps.clean_data_with_timestamps,

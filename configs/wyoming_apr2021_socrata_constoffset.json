@@ -1,0 +1,89 @@
+{
+  "pipeline_name": "wyoming-apr2021-socrata-constoffset",
+  "version": "1.0.0",
+  "created": "2026-02-19",
+  "attack_plan": "attack_plans/WYOMING-APR2021-SOCRATA-CONSTOFFSET.md",
+  "notes": "April 2021 data downloaded from data.transportation.gov Socrata API",
+  
+  "data": {
+    "source_file": "April_2021_Wyoming_Data_CamelCase.parquet/",
+    "source_type": "parquet",
+    "csv_source": "April_2021_Wyoming_Data.csv",
+    
+    "columns_to_extract": [
+      "metadata_receivedat",
+      "coredata_msgcnt",
+      "coredata_id",
+      "coredata_position_lat",
+      "coredata_position_long",
+      "coredata_elevation",
+      "coredata_accelset_accelyaw",
+      "coredata_accuracy_semimajor",
+      "coredata_speed",
+      "coredata_heading"
+    ],
+    
+    "filtering": {
+      "center_longitude": -106.0831353,
+      "center_latitude": 41.5430216,
+      "radius_meters": 2000
+    },
+    
+    "date_range": {
+      "start": "2021-04-01",
+      "end": "2021-04-30"
+    },
+    
+    "coordinate_conversion": {
+      "enabled": true,
+      "method": "local_projection",
+      "output_columns": ["x_pos", "y_pos"]
+    }
+  },
+  
+  "attack": {
+    "type": "constant_offset_per_vehicle",
+    "malicious_ratio": 0.30,
+    "offset_distance_min": 100,
+    "offset_distance_max": 200,
+    "offset_direction_min": 0,
+    "offset_direction_max": 360,
+    "seed": 42,
+    "label_column": "isAttacker"
+  },
+  
+  "ml": {
+    "features": [
+      "x_pos",
+      "y_pos", 
+      "coredata_elevation",
+      "coredata_speed",
+      "coredata_accelset_accelyaw",
+      "coredata_heading",
+      "coredata_accuracy_semimajor"
+    ],
+    "label": "isAttacker",
+    "train_test_split": {
+      "test_size": 0.20,
+      "random_state": 42,
+      "shuffle": true
+    },
+    "classifiers": ["RandomForest", "DecisionTree", "KNeighbors"]
+  },
+  
+  "cache": {
+    "clean_dataset": "cache/clean/wyoming-apr2021-socrata-2000m.parquet",
+    "attack_dataset": "cache/attacks/wyoming-apr2021-socrata-constoffset-100to200m-30pct.parquet"
+  },
+  
+  "output": {
+    "results_dir": "results/apr2021-socrata/",
+    "log_dir": "logs/"
+  },
+  
+  "dask": {
+    "n_workers": 4,
+    "threads_per_worker": 2,
+    "memory_limit": "12GB"
+  }
+}
