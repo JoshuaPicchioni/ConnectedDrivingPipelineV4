@@ -244,7 +244,21 @@ class DaskPipelineRunner:
 
         self.generatorContextProvider = GeneratorContextProvider(contexts=generator_contexts)
 
-        feature_columns = features_config.get("columns", ["x_pos", "y_pos", "coreData_elevation", "isAttacker"])
+        # Prefer the feature list defined in the ML config.
+        # Fall back to the legacy top-level "features" configuration.
+        configured_features = ml_config.get("features", [])
+
+        if configured_features:
+            feature_columns = list(configured_features)
+            label_column = ml_config.get("label", "isAttacker")
+
+            if label_column not in feature_columns:
+                feature_columns.append(label_column)
+        else:
+            feature_columns = features_config.get(
+                "columns",
+                ["x_pos", "y_pos", "coreData_elevation", "isAttacker"]
+            )
 
         self.MLContextProvider = MLContextProvider(
             contexts={
@@ -384,7 +398,13 @@ class DaskPipelineRunner:
         attacker.x_col = "x_pos"
         attacker.y_col = "y_pos"
 
-        attacker = attacker.add_attackers()
+        if "isAttacker" not in data.columns:
+            attacker = attacker.add_attackers()
+        else:
+            self.logger.log(
+                f"Using preassigned global vehicle-level attacker labels "
+                f"for {dataset_name} set"
+            )
 
         if attack_type == "rand_offset":
             min_dist = attack_config.get("offset_distance_min", attack_config.get("min_distance", 25))
@@ -494,53 +514,176 @@ class DaskPipelineRunner:
             metadata['total_unique_vehicle_ids'] = 0
         del data_pd_temp  # Free memory
 
-        # Step 2: Train/test split
+        # Step 2: Vehicle-disjoint train/test split
         self.logger.log("")
         self.logger.log("=" * 50)
-        self.logger.log("STEP 2: TRAIN/TEST SPLIT")
+        self.logger.log("STEP 2: VEHICLE-DISJOINT TRAIN/TEST SPLIT")
         self.logger.log("=" * 50)
-        
+
+        import pandas as pd
+        from sklearn.model_selection import train_test_split as sklearn_split
+
         ml_config = self.config.get("ml", {})
         split_config = ml_config.get("train_test_split", {})
+        attack_config = self.config.get("attack", self.config.get("attacks", {}))
 
         test_size = split_config.get("test_size", 0.2)
-        train_ratio = 1.0 - test_size if test_size else split_config.get("train_ratio", 0.8)
-        
-        num_rows_to_train = int(total_rows * train_ratio)
-        
-        if num_rows_to_train >= total_rows:
-            num_rows_to_train = int(total_rows * 0.8)
-        if num_rows_to_train < 1:
-            num_rows_to_train = 1
+        split_seed = split_config.get("random_state", 42)
+        attack_ratio = attack_config.get(
+            "malicious_ratio",
+            attack_config.get("ratio", 0.0)
+        )
+        attack_seed = attack_config.get("seed", 42)
 
-        num_rows_to_test = total_rows - num_rows_to_train
+        # Extract the complete vehicle population before splitting.
+        unique_ids = sorted(
+            data["coreData_id"].dropna().unique().compute().tolist()
+        )
 
-        self.logger.log(f"Train ratio: {train_ratio:.2%}")
-        self.logger.log(f"Test ratio: {test_size:.2%}")
+        if len(unique_ids) < 2:
+            raise RuntimeError(
+                f"Vehicle-disjoint split requires at least 2 unique IDs; "
+                f"found {len(unique_ids)}"
+            )
+
+        self.logger.log(
+            f"Total unique vehicle IDs before split: {len(unique_ids):,}"
+        )
+
+        # --------------------------------------------------------------
+        # Global attacker assignment
+        # --------------------------------------------------------------
+        # Select attacker vehicles ONCE from the complete regional
+        # vehicle population. The resulting labels are preserved in both
+        # train and test partitions.
+        if attack_ratio <= 0.0:
+            attacker_ids_set = set()
+        elif attack_ratio >= 1.0:
+            attacker_ids_set = set(unique_ids)
+        else:
+            _, attacker_ids = sklearn_split(
+                unique_ids,
+                test_size=attack_ratio,
+                random_state=attack_seed,
+                shuffle=True,
+            )
+            attacker_ids_set = set(attacker_ids)
+
+        self.logger.log(
+            f"Globally assigned attacker vehicles: "
+            f"{len(attacker_ids_set):,} / {len(unique_ids):,} "
+            f"({len(attacker_ids_set) / len(unique_ids):.2%})"
+        )
+
+        # Build a vehicle-level table so the train/test split can be
+        # stratified by attacker status.
+        id_df = pd.DataFrame({"coreData_id": unique_ids})
+        id_df["isAttacker"] = (
+            id_df["coreData_id"].isin(attacker_ids_set).astype("int8")
+        )
+
+        stratify_labels = None
+        if id_df["isAttacker"].nunique() > 1:
+            stratify_labels = id_df["isAttacker"]
+
+        train_id_df, test_id_df = sklearn_split(
+            id_df,
+            test_size=test_size,
+            random_state=split_seed,
+            shuffle=True,
+            stratify=stratify_labels,
+        )
+
+        train_ids = set(train_id_df["coreData_id"].tolist())
+        test_ids = set(test_id_df["coreData_id"].tolist())
+
+        # --------------------------------------------------------------
+        # Hard vehicle-disjoint validation
+        # --------------------------------------------------------------
+        overlap_ids = train_ids.intersection(test_ids)
+
+        if overlap_ids:
+            raise RuntimeError(
+                f"VEHICLE-DISJOINT SPLIT FAILED: "
+                f"{len(overlap_ids)} IDs appear in both train and test"
+            )
+
+        if train_ids.union(test_ids) != set(unique_ids):
+            raise RuntimeError(
+                "VEHICLE-DISJOINT SPLIT FAILED: "
+                "train/test vehicle union does not match original ID set"
+            )
+
+        train_attacker_ids = train_ids.intersection(attacker_ids_set)
+        test_attacker_ids = test_ids.intersection(attacker_ids_set)
+
+        self.logger.log(f"Train vehicle IDs: {len(train_ids):,}")
+        self.logger.log(f"Test vehicle IDs: {len(test_ids):,}")
+        self.logger.log(f"Train/test ID overlap: {len(overlap_ids)}")
+        self.logger.log(
+            f"Train attacker vehicles: "
+            f"{len(train_attacker_ids):,} / {len(train_ids):,} "
+            f"({len(train_attacker_ids) / len(train_ids):.2%})"
+        )
+        self.logger.log(
+            f"Test attacker vehicles: "
+            f"{len(test_attacker_ids):,} / {len(test_ids):,} "
+            f"({len(test_attacker_ids) / len(test_ids):.2%})"
+        )
+
+        # --------------------------------------------------------------
+        # Assign every BSM according to its vehicle partition
+        # --------------------------------------------------------------
+        train_ids_list = sorted(train_ids)
+        test_ids_list = sorted(test_ids)
+        attacker_ids_list = sorted(attacker_ids_set)
+
+        train = data[
+            data["coreData_id"].isin(train_ids_list)
+        ]
+
+        test = data[
+            data["coreData_id"].isin(test_ids_list)
+        ]
+
+        # Apply the globally determined attacker labels.
+        train = train.assign(
+            isAttacker=train["coreData_id"]
+            .isin(attacker_ids_list)
+            .astype("int64")
+        )
+
+        test = test.assign(
+            isAttacker=test["coreData_id"]
+            .isin(attacker_ids_list)
+            .astype("int64")
+        )
+
+        # Row counts will not necessarily be exactly 80/20 because the
+        # split is performed by vehicle rather than by BSM record.
+        num_rows_to_train = int(train.shape[0].compute())
+        num_rows_to_test = int(test.shape[0].compute())
+
         self.logger.log(f"Train rows: {num_rows_to_train:,}")
         self.logger.log(f"Test rows: {num_rows_to_test:,}")
-        
-        import dask.dataframe as dd
-        from sklearn.model_selection import train_test_split as sklearn_split
-        data_pd = data.compute()
-        
-        # Use sklearn train_test_split with shuffle for proper randomization
-        label_col = ml_config.get("label", "isAttacker")
-        if label_col in data_pd.columns and data_pd[label_col].nunique() > 1:
-            train_pd, test_pd = sklearn_split(
-                data_pd, test_size=test_size, random_state=42, 
-                shuffle=True, stratify=data_pd[label_col]
-            )
-        else:
-            # Fallback without stratify if label column missing or single class
-            train_pd, test_pd = sklearn_split(
-                data_pd, test_size=test_size, random_state=42, shuffle=True
-            )
-        
-        self.logger.log(f"Train/test split: shuffle=True, random_state=42, stratified={label_col in data_pd.columns}")
-        
-        train = dd.from_pandas(train_pd, npartitions=max(1, len(train_pd) // 1000 + 1))
-        test = dd.from_pandas(test_pd, npartitions=max(1, len(test_pd) // 1000 + 1)) if len(test_pd) > 0 else dd.from_pandas(train_pd.head(0), npartitions=1)
+        self.logger.log(
+            f"Actual train row ratio: "
+            f"{num_rows_to_train / total_rows:.2%}"
+        )
+        self.logger.log(
+            f"Actual test row ratio: "
+            f"{num_rows_to_test / total_rows:.2%}"
+        )
+
+        metadata["vehicle_disjoint_split"] = {
+            "total_vehicle_ids": len(unique_ids),
+            "train_vehicle_ids": len(train_ids),
+            "test_vehicle_ids": len(test_ids),
+            "overlap_vehicle_ids": len(overlap_ids),
+            "global_attacker_vehicle_ids": len(attacker_ids_set),
+            "train_attacker_vehicle_ids": len(train_attacker_ids),
+            "test_attacker_vehicle_ids": len(test_attacker_ids),
+        }
 
         # Step 3: Apply attacks
         self.logger.log("")
@@ -613,10 +756,39 @@ class DaskPipelineRunner:
         mcp.logger = Logger("DaskMClassifierPipeline")
         
         from MachineLearning.DaskMClassifierPipeline import DEFAULT_CLASSIFIER_INSTANCES
-        base_instances = self.MLContextProvider.get(
-            "MClassifierPipeline.classifier_instances",
-            DEFAULT_CLASSIFIER_INSTANCES
-        )
+
+        # Respect classifier selection from the JSON ML configuration.
+        requested_classifiers = ml_config.get("classifiers", [])
+
+        if requested_classifiers:
+            classifier_map = {
+                "RandomForest": RandomForestClassifier(),
+                "RandomForestClassifier": RandomForestClassifier(),
+                "DecisionTree": DecisionTreeClassifier(),
+                "DecisionTreeClassifier": DecisionTreeClassifier(),
+                "KNeighbors": KNeighborsClassifier(),
+                "KNeighborsClassifier": KNeighborsClassifier(),
+            }
+
+            unknown = [
+                name for name in requested_classifiers
+                if name not in classifier_map
+            ]
+
+            if unknown:
+                raise ValueError(
+                    f"Unknown classifier names in configuration: {unknown}"
+                )
+
+            base_instances = [
+                classifier_map[name]
+                for name in requested_classifiers
+            ]
+        else:
+            base_instances = self.MLContextProvider.get(
+                "MClassifierPipeline.classifier_instances",
+                DEFAULT_CLASSIFIER_INSTANCES
+            )
         # CRITICAL: clone() each classifier to avoid shared state between pipeline runs
         mcp.classifier_instances = [clone(clf) for clf in base_instances]
         

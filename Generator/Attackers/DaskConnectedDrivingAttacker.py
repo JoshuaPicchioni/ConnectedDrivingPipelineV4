@@ -252,8 +252,17 @@ class DaskConnectedDrivingAttacker(IConnectedDrivingAttacker):
             f"min_dist={min_dist}m, max_dist={max_dist}m"
         )
 
-        def _apply_rand_offset_vectorized(partition, min_dist, max_dist, seed,
-                                          x_col, y_col, is_xy_coords):
+        def _apply_rand_offset_vectorized(
+            partition,
+            min_dist,
+            max_dist,
+            seed,
+            x_col,
+            y_col,
+            is_xy_coords,
+            dataset_seed_offset,
+            partition_info=None,
+        ):
             """Vectorized random offset using numpy random arrays."""
             partition = partition.copy()
             
@@ -264,8 +273,26 @@ class DaskConnectedDrivingAttacker(IConnectedDrivingAttacker):
             if n_attackers == 0:
                 return partition
             
-            # Generate random directions and distances for all attackers at once
-            rng = np.random.RandomState(seed)
+            # Generate a deterministic but unique random stream for
+            # each Dask partition and dataset (train/test).
+            partition_number = (
+                partition_info.get("number", 0)
+                if partition_info is not None
+                else 0
+            )
+
+            partition_seed = int(
+                np.random.SeedSequence(
+                    [
+                        int(seed),
+                        int(dataset_seed_offset),
+                        int(partition_number),
+                    ]
+                ).generate_state(1, dtype=np.uint32)[0]
+            )
+
+            rng = np.random.RandomState(partition_seed)
+
             directions = rng.uniform(0, 360, n_attackers)
             distances = rng.uniform(min_dist, max_dist, n_attackers)
             
@@ -299,6 +326,14 @@ class DaskConnectedDrivingAttacker(IConnectedDrivingAttacker):
             
             return partition
 
+        # Stable dataset-specific offset prevents train and test from
+        # reusing identical partition random streams.
+        import zlib
+
+        dataset_seed_offset = (
+            zlib.crc32(str(self.id).encode("utf-8")) & 0xFFFFFFFF
+        )
+
         self.data = self.data.map_partitions(
             _apply_rand_offset_vectorized,
             min_dist=min_dist,
@@ -307,6 +342,7 @@ class DaskConnectedDrivingAttacker(IConnectedDrivingAttacker):
             x_col=self.x_col,
             y_col=self.y_col,
             is_xy_coords=self.isXYCoords,
+            dataset_seed_offset=dataset_seed_offset,
             meta=self.data._meta
         )
 

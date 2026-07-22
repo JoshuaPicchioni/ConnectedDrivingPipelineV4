@@ -191,3 +191,7 @@ results/
 
 # Watch scripts
 watch-*.sh
+
+# Nibi / Slurm runtime logs
+build_parquet_*.out
+nibi_baseline_*.out
