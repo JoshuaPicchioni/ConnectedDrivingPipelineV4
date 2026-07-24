@@ -1,0 +1,49 @@
+{
+  "started_at": "2026-02-24T04:57:15.817058",
+  "current_pipeline": 4,
+  "completed": [
+    "basic_2km_const",
+    "basic_2km_rand",
+    "basic_2km_withid_const",
+    "basic_2km_withid_rand"
+  ],
+  "failed": [],
+  "results": {
+    "basic_2km_const": {
+      "errors": [],
+      "rows": 264444,
+      "accuracy": 0.99999,
+      "attackers_applied": false,
+      "completed": true,
+      "duration_seconds": 30,
+      "log_file": "/home/ubuntu/repos/ConnectedDrivingPipelineV4/logs/basic_2km_const_20260224_045715.log"
+    },
+    "basic_2km_rand": {
+      "errors": [],
+      "rows": 200,
+      "accuracy": 0.99999,
+      "attackers_applied": false,
+      "completed": true,
+      "duration_seconds": 221,
+      "log_file": "/home/ubuntu/repos/ConnectedDrivingPipelineV4/logs/basic_2km_rand_20260224_045751.log"
+    },
+    "basic_2km_withid_const": {
+      "errors": [],
+      "rows": 200,
+      "accuracy": 0.99999,
+      "attackers_applied": false,
+      "completed": true,
+      "duration_seconds": 231,
+      "log_file": "/home/ubuntu/repos/ConnectedDrivingPipelineV4/logs/basic_2km_withid_const_20260224_050137.log"
+    },
+    "basic_2km_withid_rand": {
+      "errors": [],
+      "rows": 200,
+      "accuracy": 1.0,
+      "attackers_applied": false,
+      "completed": true,
+      "duration_seconds": 221,
+      "log_file": "/home/ubuntu/repos/ConnectedDrivingPipelineV4/logs/basic_2km_withid_rand_20260224_050533.log"
+    }
+  }
+}

@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""
+Pipeline Queue Web Dashboard Generator
+Generates an HTML status page at /var/www/static/pipeline-status.html
+"""
+
+import json
+import os
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+QUEUE_DIR = Path.home() / ".pipeline-queue"
+QUEUE_FILE = QUEUE_DIR / "queue.json"
+STATE_FILE = QUEUE_DIR / "state.json"
+PID_FILE = QUEUE_DIR / "daemon.pid"
+OUTPUT_FILE = Path("/var/www/static/pipeline-status.html")
+RESULTS_BASE = Path("/var/www/static/pipeline-results")
+
+def load_queue():
+    try:
+        return json.loads(QUEUE_FILE.read_text())
+    except:
+        return []
+
+def load_state():
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except:
+        return {"current_job": None, "history": []}
+
+def get_progress_from_log(log_path):
+    if not Path(log_path).exists():
+        return None
+    
+    try:
+        result = subprocess.run(
+            ["tail", "-100", str(log_path)],
+            capture_output=True, text=True
+        )
+        lines = result.stdout.strip().split('\n')
+        
+        progress = {
+            "stage": "Unknown",
+            "last_activity": None,
+            "rows_processed": 0,
+        }
+        
+        for line in reversed(lines):
+            if "DataGatherer:" in line and "line" in line:
+                try:
+                    parts = line.split("line ")
+                    if len(parts) > 1:
+                        progress["rows_processed"] = int(parts[1].strip())
+                        progress["stage"] = "Data Gathering"
+                except:
+                    pass
+            elif "ConnectedDrivingLargeDataCleaner:" in line:
+                progress["stage"] = "Data Cleaning"
+            elif "Training" in line or "Fitting" in line or "TRAINING" in line:
+                progress["stage"] = "Model Training"
+            elif "Evaluating" in line or "Testing" in line:
+                progress["stage"] = "Evaluation"
+            elif "COMPLETE" in line:
+                progress["stage"] = "Complete"
+            
+            if progress["last_activity"] is None and "LogLevel" in line:
+                try:
+                    ts = line.split("LogLevel.INFO ")[1].split(" ")[0:2]
+                    progress["last_activity"] = " ".join(ts)
+                except:
+                    pass
+        
+        return progress
+    except:
+        return None
+
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}h {mins}m"
+
+def is_daemon_running():
+    if not PID_FILE.exists():
+        return False
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except:
+        return False
+
+def generate_html():
+    state = load_state()
+    queue = load_queue()
+    current = state.get("current_job")
+    history = state.get("history", [])
+    daemon_running = is_daemon_running()
+    
+    # Get progress for current job
+    progress = None
+    runtime = None
+    if current and current.get("results_dir"):
+        log_path = Path(current["results_dir"]) / "pipeline.log"
+        progress = get_progress_from_log(log_path)
+        if current.get('started_at'):
+            try:
+                start = datetime.strptime(current['started_at'], "%Y-%m-%d %H:%M:%S")
+                runtime = format_duration((datetime.now() - start).total_seconds())
+            except:
+                pass
+    
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="30">
+    <title>Pipeline Queue Status</title>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #eee;
+            padding: 20px;
+        }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        h1 {{ 
+            text-align: center; 
+            margin-bottom: 30px; 
+            font-size: 2.5em;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .card {{
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }}
+        .card h2 {{
+            font-size: 1.3em;
+            margin-bottom: 16px;
+            color: #00d4ff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .status-row {{
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }}
+        .status-row:last-child {{ border-bottom: none; }}
+        .status-label {{ color: #888; }}
+        .status-value {{ font-weight: 600; }}
+        .status-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }}
+        .badge-running {{ background: #22c55e; color: #000; }}
+        .badge-stopped {{ background: #ef4444; color: #fff; }}
+        .badge-queued {{ background: #3b82f6; color: #fff; }}
+        .badge-success {{ background: #22c55e; color: #000; }}
+        .badge-failed {{ background: #ef4444; color: #fff; }}
+        .progress-bar {{
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }}
+        .progress-fill {{
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            border-radius: 4px;
+            animation: pulse 2s ease-in-out infinite;
+        }}
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.7; }}
+        }}
+        .queue-item {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }}
+        .queue-item:last-child {{ margin-bottom: 0; }}
+        .queue-position {{
+            width: 30px;
+            height: 30px;
+            background: #3b82f6;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            margin-right: 12px;
+        }}
+        .history-item {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }}
+        .pipeline-name {{
+            font-family: monospace;
+            font-size: 0.9em;
+            color: #ddd;
+            word-break: break-all;
+        }}
+        .timestamp {{ color: #888; font-size: 0.85em; }}
+        .empty-state {{
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }}
+        a {{ color: #00d4ff; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .refresh-note {{
+            text-align: center;
+            color: #666;
+            font-size: 0.85em;
+            margin-top: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Pipeline Queue</h1>
+        
+        <div class="card">
+            <h2>📊 System Status</h2>
+            <div class="status-row">
+                <span class="status-label">Daemon</span>
+                <span class="status-badge {"badge-running" if daemon_running else "badge-stopped"}">
+                    {"Running ✓" if daemon_running else "Stopped ✗"}
+                </span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Queued Jobs</span>
+                <span class="status-value">{len(queue)}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Completed Jobs</span>
+                <span class="status-value">{len(history)}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Last Updated</span>
+                <span class="status-value">{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</span>
+            </div>
+        </div>
+'''
+    
+    # Current job card
+    if current:
+        stage = progress.get("stage", "Unknown") if progress else "Unknown"
+        last_activity = progress.get("last_activity", "N/A") if progress else "N/A"
+        rows = progress.get("rows_processed", 0) if progress else 0
+        log_url = f"/pipeline-results/{current['id']}/pipeline.log"
+        results_url = f"/pipeline-results/{current['id']}/"
+        
+        html += f'''
+        <div class="card">
+            <h2>▶️ Current Job</h2>
+            <div class="status-row">
+                <span class="status-label">Job ID</span>
+                <span class="status-value">{current.get('id', 'N/A')}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Pipeline</span>
+                <span class="pipeline-name">{current.get('pipeline', 'N/A')}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Started</span>
+                <span class="status-value">{current.get('started_at', 'N/A')}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Runtime</span>
+                <span class="status-value">{runtime or 'N/A'}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Stage</span>
+                <span class="status-badge badge-running">{stage}</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Last Activity</span>
+                <span class="status-value">{last_activity}</span>
+            </div>
+            {"<div class='status-row'><span class='status-label'>Rows Processed</span><span class='status-value'>" + f"{rows:,}" + "</span></div>" if rows else ""}
+            <div class="status-row">
+                <span class="status-label">Links</span>
+                <span class="status-value">
+                    <a href="{log_url}" target="_blank">View Log</a> | 
+                    <a href="{results_url}" target="_blank">Results Folder</a>
+                </span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: 100%;"></div>
+            </div>
+        </div>
+'''
+    else:
+        html += '''
+        <div class="card">
+            <h2>▶️ Current Job</h2>
+            <div class="empty-state">No job currently running</div>
+        </div>
+'''
+    
+    # Queue card
+    html += '''
+        <div class="card">
+            <h2>📋 Queue</h2>
+'''
+    if queue:
+        for i, job in enumerate(queue, 1):
+            html += f'''
+            <div class="queue-item">
+                <div style="display: flex; align-items: center;">
+                    <span class="queue-position">{i}</span>
+                    <span class="pipeline-name">{job.get('pipeline', 'N/A')}</span>
+                </div>
+                <span class="timestamp">Added: {job.get('added_at', 'N/A')}</span>
+            </div>
+'''
+    else:
+        html += '<div class="empty-state">Queue is empty</div>'
+    
+    html += '</div>'
+    
+    # History card
+    html += '''
+        <div class="card">
+            <h2>📜 Recent History</h2>
+'''
+    if history:
+        for job in reversed(history[-10:]):
+            success = job.get('exit_code') == 0
+            results_url = f"/pipeline-results/{job['id']}/"
+            html += f'''
+            <div class="history-item">
+                <div>
+                    <span class="status-badge {"badge-success" if success else "badge-failed"}">
+                        {"✓" if success else "✗"}
+                    </span>
+                    <span class="pipeline-name" style="margin-left: 8px;">{job.get('pipeline', 'N/A')[:50]}...</span>
+                </div>
+                <div>
+                    <span class="timestamp">{job.get('duration', 'N/A')}</span>
+                    <a href="{results_url}" target="_blank" style="margin-left: 12px;">Results</a>
+                </div>
+            </div>
+'''
+    else:
+        html += '<div class="empty-state">No completed jobs yet</div>'
+    
+    html += '''
+        </div>
+        
+        <p class="refresh-note">Auto-refreshes every 30 seconds</p>
+    </div>
+</body>
+</html>
+'''
+    
+    OUTPUT_FILE.write_text(html)
+    print(f"Dashboard generated: {OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    generate_html()

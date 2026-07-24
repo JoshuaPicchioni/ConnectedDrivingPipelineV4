@@ -1,0 +1,116 @@
+{
+  "pipeline_name": "feature_importance_combined_rpo_evanston_400_600_with_id",
+  "version": "feature-importance-combined-v1",
+  "created": "2026-02-23",
+  "template_generated": true,
+  "template_parameters": {
+    "spatial_radius": "100km",
+    "feature_set": "combined_raw_trajectory_with_id",
+    "attack_type": "rand_offset",
+    "with_vehicle_id": true,
+    "malicious_ratio": 0.3,
+    "range_min": 400.0,
+    "range_max": 600.0,
+    "feature_importance_run": true
+  },
+  "data": {
+    "source_file": "/scratch/picchioj/wyoming_april_2021/data/April_2021_Wyoming_Data_Fixed.parquet",
+    "source_type": "parquet",
+    "columns_to_extract": [
+      "metadata_generatedAt",
+      "metadata_receivedAt",
+      "coreData_id",
+      "coreData_position_lat",
+      "coreData_position_long",
+      "coreData_speed",
+      "coreData_heading",
+      "coreData_accelset_accelYaw",
+      "coreData_elevation",
+      "coreData_accuracy_semiMajor"
+    ],
+    "num_subsection_rows": null,
+    "filtering": {
+      "center_longitude": -110.96,
+      "center_latitude": 41.27,
+      "radius_meters": 100000
+    },
+    "date_range": {
+      "start": "2021-04-01",
+      "end": "2021-04-30"
+    },
+    "coordinate_conversion": {
+      "enabled": true,
+      "method": "local_projection",
+      "output_columns": [
+        "x_pos",
+        "y_pos"
+      ]
+    }
+  },
+  "attack": {
+    "type": "rand_offset",
+    "malicious_ratio": 0.3,
+    "label_column": "isAttacker",
+    "offset_distance_min": 400,
+    "offset_distance_max": 600,
+    "offset_direction_min": 0,
+    "offset_direction_max": 360,
+    "seed": 42
+  },
+  "ml": {
+    "features": [
+      "x_pos",
+      "y_pos",
+      "coreData_elevation",
+      "coreData_speed",
+      "coreData_heading",
+      "coreData_accelset_accelYaw",
+      "coreData_accuracy_semiMajor",
+      "traj_step_distance_m",
+      "traj_distance_error_m",
+      "traj_heading_error_deg",
+      "traj_position_prediction_error_m",
+      "traj_speed_error_mps",
+      "traj_accel_mps2",
+      "traj_turn_change_deg",
+      "coreData_id"
+    ],
+    "label": "isAttacker",
+    "train_test_split": {
+      "test_size": 0.2,
+      "random_state": 42,
+      "shuffle": true,
+      "type": "vehicle_disjoint",
+      "train_ratio": 0.8
+    },
+    "classifiers": [
+      "RandomForest",
+      "DecisionTree",
+      "KNeighbors"
+    ],
+    "trajectory_mode": true
+  },
+  "cache": {
+    "enabled": false,
+    "version": "feature-importance-combined-v1"
+  },
+  "output": {
+    "results_dir": "results/feature_importance_pipeline/rpo/feature_importance_combined_rpo_evanston_400_600_with_id/",
+    "log_dir": "logs/feature_importance_pipeline/rpo/"
+  },
+  "dask": {
+    "n_workers": 4,
+    "threads_per_worker": 2,
+    "memory_limit": "12GB",
+    "dashboard_address": ":0"
+  },
+  "feature_importance": {
+    "enabled": true,
+    "method": "test_set_permutation_importance",
+    "scoring": "attacker_f1",
+    "include_vehicle_id": true,
+    "feature_count": 15,
+    "source_config": "nibi_configs/final_good_trajectory/rpo/id/final_good_rpo_evanston_400_600_extended_id.json",
+    "results_dir": "results/feature_importance_combined"
+  }
+}

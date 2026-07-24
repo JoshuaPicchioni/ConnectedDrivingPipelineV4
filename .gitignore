@@ -15,6 +15,9 @@ slurms/
 slurm*
 site/
 
+# Pip artifacts (created from malformed pip install commands)
+=*
+
 # C extensions
 *.so
 
@@ -170,3 +173,25 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+Full_Wyoming_Data.csv
+
+# Large data files
+*.csv
+*.parquet
+Full_Wyoming_Data*
+pq/
+pq-web/
+
+# Cache and results (generated)
+cache/
+results/
+
+# Backup files
+*.bak
+
+# Watch scripts
+watch-*.sh
+
+# Nibi / Slurm runtime logs
+build_parquet_*.out
+nibi_baseline_*.out

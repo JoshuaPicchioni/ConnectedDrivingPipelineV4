@@ -1,0 +1,20 @@
+# Dask configuration for 64GB RAM server
+distributed:
+  worker:
+    memory:
+      target: 0.7
+      spill: 0.8
+      pause: 0.9
+      terminate: 0.95
+
+  scheduler:
+    work-stealing: true
+    
+temporary-directory: /tmp/dask-worker-space
+
+array:
+  chunk-size: 128MiB
+
+dataframe:
+  shuffle:
+    compression: lz4

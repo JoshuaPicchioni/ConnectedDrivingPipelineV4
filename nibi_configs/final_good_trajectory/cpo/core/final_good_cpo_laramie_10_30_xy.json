@@ -1,0 +1,91 @@
+{
+  "pipeline_name": "final_good_cpo_laramie_10_30_xy",
+  "version": "final-signed-xy-2026-07-23",
+  "created": "2026-02-23",
+  "template_generated": true,
+  "template_parameters": {
+    "spatial_radius": "100km",
+    "feature_set": "xy",
+    "attack_type": "const_offset_per_id",
+    "with_vehicle_id": false,
+    "malicious_ratio": 0.3
+  },
+  "data": {
+    "source_file": "/scratch/picchioj/wyoming_april_2021/data/April_2021_Wyoming_Data_Fixed.parquet",
+    "source_type": "parquet",
+    "columns_to_extract": [
+      "metadata_generatedAt",
+      "metadata_receivedAt",
+      "coreData_id",
+      "coreData_position_lat",
+      "coreData_position_long",
+      "coreData_speed",
+      "coreData_heading",
+      "coreData_accelset_accelYaw"
+    ],
+    "num_subsection_rows": null,
+    "filtering": {
+      "center_longitude": -105.6,
+      "center_latitude": 41.31,
+      "radius_meters": 100000
+    },
+    "date_range": {
+      "start": "2021-04-01",
+      "end": "2021-04-30"
+    },
+    "coordinate_conversion": {
+      "enabled": true,
+      "method": "local_projection",
+      "output_columns": [
+        "x_pos",
+        "y_pos"
+      ]
+    }
+  },
+  "attack": {
+    "type": "const_offset_per_id",
+    "malicious_ratio": 0.3,
+    "label_column": "isAttacker",
+    "offset_distance_min": 10,
+    "offset_distance_max": 30,
+    "offset_direction_min": 0,
+    "offset_direction_max": 360,
+    "seed": 42
+  },
+  "ml": {
+    "features": [
+      "x_pos",
+      "y_pos"
+    ],
+    "label": "isAttacker",
+    "train_test_split": {
+      "test_size": 0.2,
+      "random_state": 42,
+      "shuffle": true,
+      "type": "vehicle_disjoint",
+      "train_ratio": 0.8
+    },
+    "classifiers": [
+      "RandomForest",
+      "DecisionTree",
+      "KNeighbors"
+    ],
+    "trajectory_mode": true
+  },
+  "cache": {
+    "enabled": false,
+    "version": "final-signed-xy-v4",
+    "clean_dataset": "cache/final_good_trajectory/cpo/final_good_cpo_laramie_10_30_xy/clean.parquet",
+    "attack_dataset": "cache/final_good_trajectory/cpo/final_good_cpo_laramie_10_30_xy/attack.parquet"
+  },
+  "output": {
+    "results_dir": "results/final_good_trajectory/cpo/final_good_cpo_laramie_10_30_xy/",
+    "log_dir": "logs/final_good_trajectory/cpo/"
+  },
+  "dask": {
+    "n_workers": 4,
+    "threads_per_worker": 2,
+    "memory_limit": "12GB",
+    "dashboard_address": ":0"
+  }
+}

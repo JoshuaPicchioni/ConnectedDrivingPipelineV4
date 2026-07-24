@@ -19,12 +19,25 @@ class MathHelper:
 
     @staticmethod
     def dist_between_two_points(lat1, lon1, lat2, lon2):
+        """
+        Calculate geodesic distance between two lat/lon points in meters.
+        
+        Args:
+            lat1, lon1: First point (latitude, longitude) in DEGREES
+            lat2, lon2: Second point (latitude, longitude) in DEGREES
+            
+        Returns:
+            Distance in meters
+            
+        Note:
+            FIXED BUG: geographiclib.Geodesic.Inverse() expects lat/lon in DEGREES,
+            not radians. Previous code incorrectly converted to radians first,
+            resulting in ~98% underestimation of distances.
+        """
         geod = Geodesic.WGS84
-        lat1_rad = MathHelper.deg2rad(lat1)
-        lon1_rad = MathHelper.deg2rad(lon1)
-        lat2_rad = MathHelper.deg2rad(lat2)
-        lon2_rad = MathHelper.deg2rad(lon2)
-        distance = geod.Inverse(lat1_rad, lon1_rad, lat2_rad, lon2_rad)
+        # CORRECT: Pass degrees directly to Geodesic.Inverse
+        # Geodesic library handles the conversion internally
+        distance = geod.Inverse(lat1, lon1, lat2, lon2)
         return distance['s12']
 
     @staticmethod
@@ -44,8 +57,10 @@ class MathHelper:
         newAngle = theta + direction_angle
 
         # calculating new x and y
-        x = x + distance_meters * math.cos(newAngle)
-        y = y + distance_meters * math.sin(newAngle)
+        # Convert angle from degrees to radians for math.cos/sin
+        newAngle_rad = math.radians(newAngle)
+        x = x + distance_meters * math.cos(newAngle_rad)
+        y = y + distance_meters * math.sin(newAngle_rad)
 
         return (x, y)
 

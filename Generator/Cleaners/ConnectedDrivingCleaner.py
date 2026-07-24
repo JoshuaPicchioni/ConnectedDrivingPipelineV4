@@ -76,8 +76,10 @@ class ConnectedDrivingCleaner(IConnectedDrivingCleaner):
 
     # too small of a change to be worth caching
     def convert_to_XY_Coordinates(self):
-        self.cleaned_data["x_pos"] = self.cleaned_data["x_pos"].map(lambda x: MathHelper.dist_between_two_points(x, self.y_pos, self.x_pos, self.y_pos))
-        self.cleaned_data["y_pos"] = self.cleaned_data["y_pos"].map(lambda y: MathHelper.dist_between_two_points(self.x_pos, y, self.x_pos, self.y_pos))
+        # FIXED: x_pos = distance EAST (same lat, different lon)
+        self.cleaned_data["x_pos"] = self.cleaned_data["x_pos"].map(lambda x: MathHelper.dist_between_two_points(self.y_pos, x, self.y_pos, self.x_pos))
+        # FIXED: y_pos = distance NORTH (different lat, same lon)
+        self.cleaned_data["y_pos"] = self.cleaned_data["y_pos"].map(lambda y: MathHelper.dist_between_two_points(y, self.x_pos, self.y_pos, self.x_pos))
         return self
 
     # returns the cleaned data
