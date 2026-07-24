@@ -125,9 +125,12 @@ class DaskPipelineRunner:
         hash_input = {
             'name': self.pipeline_name,
             'version': self.config.get('version', '1.0'),
+            'pipeline_code_version': 'signed-xy-cache-v3-2026-07-23',
             'data': {
                 'source_file': self.config.get('data', {}).get('source_file'),
                 'source_type': self.config.get('data', {}).get('source_type'),
+                'columns': self.config.get('data', {}).get('columns', []),
+                'columns_to_extract': self.config.get('data', {}).get('columns_to_extract', []),
                 'filtering': self.config.get('data', {}).get('filtering', {}),
                 'date_range': self.config.get('data', {}).get('date_range', {}),
                 'coordinate_conversion': self.config.get('data', {}).get('coordinate_conversion', {}),
@@ -188,7 +191,10 @@ class DaskPipelineRunner:
         )
 
         self._mlPathProvider = MLPathProvider(
-            model=self.pipeline_name,
+            # Include the config/code hash so reusing a pipeline
+            # name cannot silently load an incompatible old ML
+            # cleaner cache.
+            model=f"{self.pipeline_name}-{config_hash[:12]}",
             contexts={
                 "MConnectedDrivingDataCleaner.cleandatapathtrain": lambda model: f"data/mclassifierdata/cleaned/{model}/train/clean.csv",
                 "MConnectedDrivingDataCleaner.cleandatapathtest": lambda model: f"data/mclassifierdata/cleaned/{model}/test/clean.csv",
@@ -207,7 +213,10 @@ class DaskPipelineRunner:
             "DataGatherer.lines_per_file": data_config.get("lines_per_file", 1000000),
             "ConnectedDrivingCleaner.x_pos": filtering_config.get("center_longitude", filtering_config.get("center_x", 0.0)),
             "ConnectedDrivingCleaner.y_pos": filtering_config.get("center_latitude", filtering_config.get("center_y", 0.0)),
-            "ConnectedDrivingCleaner.columns": data_config.get("columns", self._get_default_columns()),
+            "ConnectedDrivingCleaner.columns": list(dict.fromkeys(
+                data_config.get("columns", self._get_default_columns())
+                + (data_config.get("columns_to_extract", []) or [])
+            )),
             "ConnectedDrivingLargeDataCleaner.max_dist": filtering_config.get("radius_meters", filtering_config.get("distance_meters", 2000)),
             "ConnectedDrivingCleaner.shouldGatherAutomatically": False,
             "ConnectedDrivingLargeDataCleaner.cleanerClass": cleaner_class,
@@ -248,8 +257,46 @@ class DaskPipelineRunner:
         # Fall back to the legacy top-level "features" configuration.
         configured_features = ml_config.get("features", [])
 
+        trajectory_derived_features = {
+            "traj_dt_s",
+            "traj_step_distance_m",
+            "traj_expected_distance_m",
+            "traj_distance_error_m",
+            "traj_observed_speed_mps",
+            "traj_speed_error_mps",
+            "traj_movement_heading_deg",
+            "traj_heading_error_deg",
+            "traj_position_prediction_error_m",
+            "traj_accel_mps2",
+            "traj_turn_change_deg",
+        }
+
+        trajectory_support_columns = [
+            "x_pos",
+            "y_pos",
+            "orig_x_pos",
+            "orig_y_pos",
+            "coreData_id",
+            "metadata_generatedAt",
+            "coreData_speed",
+            "coreData_heading",
+            "coreData_accelset_accelYaw",
+        ]
+
         if configured_features:
-            feature_columns = list(configured_features)
+            # Derived trajectory features do not exist yet, so only request
+            # existing/raw columns from the ML cleaner.
+            feature_columns = [
+                feature
+                for feature in configured_features
+                if feature not in trajectory_derived_features
+            ]
+
+            # Preserve all raw inputs needed to construct trajectory features.
+            for column in trajectory_support_columns:
+                if column not in feature_columns:
+                    feature_columns.append(column)
+
             label_column = ml_config.get("label", "isAttacker")
 
             if label_column not in feature_columns:
@@ -260,12 +307,345 @@ class DaskPipelineRunner:
                 ["x_pos", "y_pos", "coreData_elevation", "isAttacker"]
             )
 
+            if "coreData_id" not in feature_columns:
+                feature_columns.append("coreData_id")
+
         self.MLContextProvider = MLContextProvider(
             contexts={
                 "MConnectedDrivingDataCleaner.columns": feature_columns,
                 "MClassifierPipeline.csvWriter": self.csvWriter,
             }
         )
+
+    def _add_trajectory_features_pandas(
+        self,
+        df_pd,
+        dataset_name: str,
+    ):
+        """
+        Construct motion-consistency features from consecutive BSMs.
+
+        Features are calculated independently within each vehicle after
+        train/test splitting and after positional attacks are applied.
+
+        Only temporally adjacent messages with 0.02 <= dt <= 1.0 seconds
+        are retained. Two consecutive valid intervals are required so
+        second-order trajectory features are defined consistently for all
+        feature sets.
+        """
+        import numpy as np
+        import pandas as pd
+
+        required_columns = [
+            "coreData_id",
+            "metadata_generatedAt",
+            "x_pos",
+            "y_pos",
+            "orig_x_pos",
+            "orig_y_pos",
+            "coreData_speed",
+            "coreData_heading",
+        ]
+
+        missing_columns = [
+            column
+            for column in required_columns
+            if column not in df_pd.columns
+        ]
+
+        if missing_columns:
+            raise RuntimeError(
+                f"{dataset_name} missing trajectory source columns: "
+                f"{missing_columns}"
+            )
+
+        self.logger.log("")
+        self.logger.log("=" * 70)
+        self.logger.log(
+            f"TRAJECTORY FEATURE ENGINEERING: {dataset_name}"
+        )
+        self.logger.log("=" * 70)
+
+        df = df_pd.copy()
+
+        df["_traj_time"] = pd.to_datetime(
+            df["metadata_generatedAt"],
+            errors="coerce",
+            utc=True,
+        )
+
+        timestamp_failures = int(
+            df["_traj_time"].isna().sum()
+        )
+
+        if timestamp_failures:
+            raise ValueError(
+                f"{dataset_name} has {timestamp_failures:,} "
+                f"unparseable metadata_generatedAt values"
+            )
+
+        # Sorting is critical. Features must compare consecutive BSMs
+        # from the same vehicle in chronological order.
+        df = df.sort_values(
+            ["coreData_id", "_traj_time"],
+            kind="mergesort",
+        ).copy()
+
+        group = df.groupby(
+            "coreData_id",
+            sort=False,
+        )
+
+        previous_time = group["_traj_time"].shift(1)
+        previous_x = group["x_pos"].shift(1)
+        previous_y = group["y_pos"].shift(1)
+
+        previous_orig_x = group[
+            "orig_x_pos"
+        ].shift(1)
+
+        previous_orig_y = group[
+            "orig_y_pos"
+        ].shift(1)
+
+        previous_speed = group[
+            "coreData_speed"
+        ].shift(1)
+
+        previous_heading = group[
+            "coreData_heading"
+        ].shift(1)
+
+        dt = (
+            df["_traj_time"] - previous_time
+        ).dt.total_seconds()
+
+        # Reported displacement, potentially affected by attack.
+        dx = df["x_pos"] - previous_x
+        dy = df["y_pos"] - previous_y
+        step_distance = np.hypot(dx, dy)
+
+        # Legitimate pre-attack displacement.
+        # This is used ONLY for trajectory continuity filtering.
+        orig_dx = (
+            df["orig_x_pos"]
+            - previous_orig_x
+        )
+
+        orig_dy = (
+            df["orig_y_pos"]
+            - previous_orig_y
+        )
+
+        orig_step_distance = np.hypot(
+            orig_dx,
+            orig_dy,
+        )
+
+        orig_implied_speed = (
+            orig_step_distance / dt
+        )
+
+        # The reported speed and heading at the previous BSM are used
+        # to predict motion over the interval leading to the current BSM.
+        expected_distance = previous_speed * dt
+
+        heading_radians = np.deg2rad(
+            previous_heading
+        )
+
+        expected_dx = (
+            expected_distance
+            * np.sin(heading_radians)
+        )
+
+        expected_dy = (
+            expected_distance
+            * np.cos(heading_radians)
+        )
+
+        movement_heading = (
+            np.degrees(
+                np.arctan2(dx, dy)
+            )
+            + 360.0
+        ) % 360.0
+
+        heading_error = np.abs(
+            (
+                (
+                    movement_heading
+                    - previous_heading
+                    + 180.0
+                )
+                % 360.0
+            )
+            - 180.0
+        )
+
+        position_prediction_error = np.hypot(
+            dx - expected_dx,
+            dy - expected_dy,
+        )
+
+        observed_speed = (
+            step_distance / dt
+        )
+
+        speed_error = np.abs(
+            observed_speed - previous_speed
+        )
+
+        # Determine whether the underlying legitimate trajectory
+        # is continuous. This mask deliberately uses PRE-ATTACK
+        # positions so attack-induced jumps cannot affect row selection.
+        continuity_valid = (
+            np.isfinite(orig_step_distance)
+            & np.isfinite(orig_implied_speed)
+            & (orig_implied_speed <= 100.0)
+        )
+
+        valid_interval = (
+            dt.notna()
+            & (dt >= 0.02)
+            & (dt <= 1.0)
+            & continuity_valid
+            & np.isfinite(step_distance)
+            & np.isfinite(expected_distance)
+            & np.isfinite(position_prediction_error)
+            & np.isfinite(observed_speed)
+            & np.isfinite(speed_error)
+            & np.isfinite(heading_error)
+        )
+
+        df["traj_dt_s"] = dt
+        df["traj_step_distance_m"] = step_distance
+        df["traj_expected_distance_m"] = expected_distance
+        df["traj_distance_error_m"] = np.abs(
+            step_distance - expected_distance
+        )
+        df["traj_observed_speed_mps"] = observed_speed
+        df["traj_speed_error_mps"] = speed_error
+        df["traj_movement_heading_deg"] = movement_heading
+        df["traj_heading_error_deg"] = heading_error
+        df["traj_position_prediction_error_m"] = (
+            position_prediction_error
+        )
+
+        # Velocity estimated directly from attacked positions.
+        df["_traj_obs_vx"] = dx / dt
+        df["_traj_obs_vy"] = dy / dt
+        df["_traj_interval_valid"] = valid_interval
+
+        trajectory_group = df.groupby(
+            "coreData_id",
+            sort=False,
+        )
+
+        previous_obs_vx = trajectory_group[
+            "_traj_obs_vx"
+        ].shift(1)
+
+        previous_obs_vy = trajectory_group[
+            "_traj_obs_vy"
+        ].shift(1)
+
+        previous_movement_heading = trajectory_group[
+            "traj_movement_heading_deg"
+        ].shift(1)
+
+        previous_interval_valid = trajectory_group[
+            "_traj_interval_valid"
+        ].shift(1).fillna(False)
+
+        df["traj_accel_mps2"] = (
+            np.hypot(
+                df["_traj_obs_vx"] - previous_obs_vx,
+                df["_traj_obs_vy"] - previous_obs_vy,
+            )
+            / dt
+        )
+
+        df["traj_turn_change_deg"] = np.abs(
+            (
+                (
+                    df["traj_movement_heading_deg"]
+                    - previous_movement_heading
+                    + 180.0
+                )
+                % 360.0
+            )
+            - 180.0
+        )
+
+        # Use one common population for XY, Basic, Movement and Extended.
+        # Requiring two valid intervals means second-order features are
+        # available for every retained row.
+        final_valid = (
+            valid_interval
+            & previous_interval_valid
+            & np.isfinite(df["traj_accel_mps2"])
+            & np.isfinite(df["traj_turn_change_deg"])
+        )
+
+        original_rows = len(df)
+
+        df = df.loc[
+            final_valid
+        ].copy()
+
+        retained_rows = len(df)
+
+        self.logger.log(
+            f"Original rows: {original_rows:,}"
+        )
+        self.logger.log(
+            f"Retained trajectory-valid rows: "
+            f"{retained_rows:,}"
+        )
+        self.logger.log(
+            f"Rows removed: "
+            f"{original_rows - retained_rows:,}"
+        )
+        self.logger.log(
+            f"Retention rate: "
+            f"{100.0 * retained_rows / original_rows:.2f}%"
+        )
+
+        self.logger.log(
+            "Trajectory continuity filter: "
+            "0.02 <= dt <= 1.0 seconds, "
+            "pre-attack implied speed <= 100 m/s"
+        )
+
+        for feature in [
+            "traj_step_distance_m",
+            "traj_distance_error_m",
+            "traj_speed_error_mps",
+            "traj_heading_error_deg",
+            "traj_position_prediction_error_m",
+            "traj_accel_mps2",
+            "traj_turn_change_deg",
+        ]:
+            self.logger.log(
+                f"{feature}: "
+                f"min={df[feature].min():.6f}, "
+                f"mean={df[feature].mean():.6f}, "
+                f"max={df[feature].max():.6f}"
+            )
+
+        df = df.drop(
+            columns=[
+                "_traj_time",
+                "_traj_obs_vx",
+                "_traj_obs_vy",
+                "_traj_interval_valid",
+            ],
+            errors="ignore",
+        )
+
+        return df
+
 
     def _get_default_columns(self) -> List[str]:
         """Get default BSM columns for data gathering."""
@@ -430,6 +810,290 @@ class DaskPipelineRunner:
             attacker = attacker.add_attacks_positional_override_rand(min_dist=min_dist, max_dist=max_dist)
 
         return attacker.get_data()
+
+    def _audit_attack_injection(
+        self,
+        data,
+        attack_config,
+        dataset_name: str,
+    ):
+        """
+        Strict optional runtime validation of positional
+        attack injection.
+
+        Enable with:
+            PIPELINE_ATTACK_AUDIT=1
+        """
+        import os
+
+        if (
+            os.environ.get(
+                "PIPELINE_ATTACK_AUDIT",
+                "0",
+            )
+            != "1"
+        ):
+            return
+
+        import numpy as np
+
+        required = [
+            "coreData_id",
+            "isAttacker",
+            "x_pos",
+            "y_pos",
+            "orig_x_pos",
+            "orig_y_pos",
+        ]
+
+        missing = [
+            column
+            for column in required
+            if column not in data.columns
+        ]
+
+        if missing:
+            raise RuntimeError(
+                f"{dataset_name} attack audit "
+                f"missing columns: {missing}"
+            )
+
+        audit = data[
+            required
+        ].compute()
+
+        if audit.empty:
+            raise RuntimeError(
+                f"{dataset_name} attack audit "
+                f"received no rows"
+            )
+
+        labels = set(
+            audit["isAttacker"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        if not labels.issubset(
+            {0, 1}
+        ):
+            raise RuntimeError(
+                f"{dataset_name} attack audit "
+                f"found invalid labels: "
+                f"{sorted(labels)}"
+            )
+
+        clean = audit[
+            audit["isAttacker"] == 0
+        ]
+
+        attackers = audit[
+            audit["isAttacker"] == 1
+        ].copy()
+
+        clean_changed = (
+            ~np.isclose(
+                clean["x_pos"].to_numpy(
+                    dtype="float64"
+                ),
+                clean["orig_x_pos"].to_numpy(
+                    dtype="float64"
+                ),
+                rtol=0.0,
+                atol=1e-9,
+            )
+            |
+            ~np.isclose(
+                clean["y_pos"].to_numpy(
+                    dtype="float64"
+                ),
+                clean["orig_y_pos"].to_numpy(
+                    dtype="float64"
+                ),
+                rtol=0.0,
+                atol=1e-9,
+            )
+        )
+
+        if bool(
+            clean_changed.any()
+        ):
+            raise RuntimeError(
+                f"{dataset_name} attack audit: "
+                f"clean rows were modified: "
+                f"{int(clean_changed.sum()):,}"
+            )
+
+        if attackers.empty:
+            raise RuntimeError(
+                f"{dataset_name} attack audit "
+                f"found zero attacker rows"
+            )
+
+        attackers["_audit_dx"] = (
+            attackers["x_pos"]
+            - attackers["orig_x_pos"]
+        )
+
+        attackers["_audit_dy"] = (
+            attackers["y_pos"]
+            - attackers["orig_y_pos"]
+        )
+
+        attackers["_audit_distance"] = (
+            np.hypot(
+                attackers["_audit_dx"],
+                attackers["_audit_dy"],
+            )
+        )
+
+        attack_type = attack_config.get(
+            "type",
+            "none",
+        )
+
+        min_dist = float(
+            attack_config.get(
+                "offset_distance_min",
+                attack_config.get(
+                    "min_distance",
+                    0.0,
+                ),
+            )
+        )
+
+        max_dist = float(
+            attack_config.get(
+                "offset_distance_max",
+                attack_config.get(
+                    "max_distance",
+                    0.0,
+                ),
+            )
+        )
+
+        if attack_type in {
+            "rand_offset",
+            "const_offset_per_id",
+        }:
+
+            tolerance = 1e-6
+
+            outside = (
+                (
+                    attackers[
+                        "_audit_distance"
+                    ]
+                    < min_dist
+                    - tolerance
+                )
+                |
+                (
+                    attackers[
+                        "_audit_distance"
+                    ]
+                    > max_dist
+                    + tolerance
+                )
+            )
+
+            if bool(
+                outside.any()
+            ):
+                raise RuntimeError(
+                    f"{dataset_name} "
+                    f"{attack_type} audit "
+                    f"found "
+                    f"{int(outside.sum()):,} "
+                    f"attacker rows outside "
+                    f"[{min_dist}, "
+                    f"{max_dist}] meters"
+                )
+
+        if (
+            attack_type
+            == "const_offset_per_id"
+        ):
+
+            grouped = (
+                attackers
+                .groupby(
+                    "coreData_id"
+                )[
+                    [
+                        "_audit_dx",
+                        "_audit_dy",
+                    ]
+                ]
+                .agg(
+                    [
+                        "min",
+                        "max",
+                    ]
+                )
+            )
+
+            dx_spread = (
+                grouped[
+                    (
+                        "_audit_dx",
+                        "max",
+                    )
+                ]
+                - grouped[
+                    (
+                        "_audit_dx",
+                        "min",
+                    )
+                ]
+            ).abs()
+
+            dy_spread = (
+                grouped[
+                    (
+                        "_audit_dy",
+                        "max",
+                    )
+                ]
+                - grouped[
+                    (
+                        "_audit_dy",
+                        "min",
+                    )
+                ]
+            ).abs()
+
+            inconsistent = (
+                (dx_spread > 1e-9)
+                |
+                (dy_spread > 1e-9)
+            )
+
+            if bool(
+                inconsistent.any()
+            ):
+                raise RuntimeError(
+                    f"{dataset_name} CPO "
+                    f"audit found "
+                    f"{int(inconsistent.sum()):,} "
+                    f"attacker vehicles "
+                    f"with non-constant "
+                    f"offsets"
+                )
+
+        self.logger.log(
+            f"ATTACK AUDIT PASSED "
+            f"[{dataset_name}] "
+            f"type={attack_type}, "
+            f"rows={len(audit):,}, "
+            f"clean={len(clean):,}, "
+            f"attacker={len(attackers):,}, "
+            f"attacker_offset_min="
+            f"{attackers['_audit_distance'].min():.6f}, "
+            f"attacker_offset_max="
+            f"{attackers['_audit_distance'].max():.6f}"
+        )
 
     def write_entire_row(self, result_dict: Dict[str, Any]):
         """Write results to CSV output."""
@@ -695,8 +1359,43 @@ class DaskPipelineRunner:
         self.logger.log(f"Attack type: {attack_config.get('type', 'none')}")
         self.logger.log(f"Malicious ratio: {attack_config.get('malicious_ratio', 0)}")
         
-        train = self._apply_attacks(train, attack_config, "train")
-        test = self._apply_attacks(test, attack_config, "test")
+        # Preserve legitimate pre-attack positions.
+        # These are used only to detect genuine trajectory discontinuities
+        # and are never supplied to the classifier unless explicitly
+        # configured as ML features.
+        train = train.assign(
+            orig_x_pos=train["x_pos"],
+            orig_y_pos=train["y_pos"],
+        )
+
+        test = test.assign(
+            orig_x_pos=test["x_pos"],
+            orig_y_pos=test["y_pos"],
+        )
+
+        train = self._apply_attacks(
+            train,
+            attack_config,
+            "train",
+        )
+
+        test = self._apply_attacks(
+            test,
+            attack_config,
+            "test",
+        )
+
+        self._audit_attack_injection(
+            train,
+            attack_config,
+            "TRAIN",
+        )
+
+        self._audit_attack_injection(
+            test,
+            attack_config,
+            "TEST",
+        )
 
         # Extract comprehensive vehicle stats AFTER attacks
         train_vehicle_stats = self._extract_vehicle_stats(train, "TRAIN SET")
@@ -789,15 +1488,437 @@ class DaskPipelineRunner:
                 "MClassifierPipeline.classifier_instances",
                 DEFAULT_CLASSIFIER_INSTANCES
             )
+
+
+        # Use exactly the CPU resources allocated by Slurm for Random Forest.
+        # This avoids sklearn's default single-job behavior while preventing
+        # the classifier from consuming all CPUs on a shared Nibi node.
+        import os
+
+        rf_n_jobs = max(
+            1,
+            int(
+                os.environ.get(
+                    "RF_N_JOBS",
+                    os.environ.get("SLURM_CPUS_PER_TASK", "1")
+                )
+            )
+        )
+
+        for classifier_instance in base_instances:
+            if isinstance(
+                classifier_instance,
+                RandomForestClassifier,
+            ):
+                classifier_instance.set_params(
+                    n_jobs=rf_n_jobs,
+                    random_state=42,
+                )
+
+            elif isinstance(
+                classifier_instance,
+                DecisionTreeClassifier,
+            ):
+                classifier_instance.set_params(
+                    random_state=42,
+                )
+
+            elif isinstance(
+                classifier_instance,
+                KNeighborsClassifier,
+            ):
+                classifier_instance.set_params(
+                    n_jobs=rf_n_jobs,
+                )
+
+        self.logger.log(
+            f"RandomForest n_jobs configured from Slurm allocation: "
+            f"{rf_n_jobs}"
+        )
         # CRITICAL: clone() each classifier to avoid shared state between pipeline runs
         mcp.classifier_instances = [clone(clf) for clf in base_instances]
         
         self.logger.log("Converting input data to pandas...")
-        train_X_pd = train_X.compute() if hasattr(train_X, 'compute') else train_X
-        train_Y_pd = train_Y.compute() if hasattr(train_Y, 'compute') else train_Y
-        test_X_pd = test_X.compute() if hasattr(test_X, 'compute') else test_X
-        test_Y_pd = test_Y.compute() if hasattr(test_Y, 'compute') else test_Y
-        
+
+        # Materialize each complete labeled dataset exactly once.
+        # Splitting X/Y only after materialization guarantees that features
+        # and labels come from the exact same realized Dask computation.
+        m_train_pd = m_train.compute() if hasattr(m_train, 'compute') else m_train
+        m_test_pd = m_test.compute() if hasattr(m_test, 'compute') else m_test
+
+        if attacker_col_name not in m_train_pd.columns:
+            raise RuntimeError(
+                f"Missing label column {attacker_col_name!r} in training matrix"
+            )
+
+        if attacker_col_name not in m_test_pd.columns:
+            raise RuntimeError(
+                f"Missing label column {attacker_col_name!r} in test matrix"
+            )
+
+        configured_model_features = list(
+            ml_config.get("features", [])
+        )
+
+        trajectory_requested = (
+            bool(ml_config.get("trajectory_mode", False))
+            or any(
+                feature.startswith("traj_")
+                for feature in configured_model_features
+            )
+        )
+
+        if trajectory_requested:
+            m_train_pd = self._add_trajectory_features_pandas(
+                m_train_pd,
+                "TRAIN",
+            )
+
+            m_test_pd = self._add_trajectory_features_pandas(
+                m_test_pd,
+                "TEST",
+            )
+
+        # Preserve vehicle identity separately for optional weighting.
+        if "coreData_id" not in m_train_pd.columns:
+            raise RuntimeError(
+                "coreData_id missing from training data"
+            )
+
+        train_vehicle_ids_pd = (
+            m_train_pd["coreData_id"].copy()
+        )
+
+        train_Y_pd = m_train_pd[
+            attacker_col_name
+        ].copy()
+
+        test_Y_pd = m_test_pd[
+            attacker_col_name
+        ].copy()
+
+        if configured_model_features:
+            missing_train_features = [
+                feature
+                for feature in configured_model_features
+                if feature not in m_train_pd.columns
+            ]
+
+            missing_test_features = [
+                feature
+                for feature in configured_model_features
+                if feature not in m_test_pd.columns
+            ]
+
+            if missing_train_features:
+                raise RuntimeError(
+                    f"Missing configured TRAIN features: "
+                    f"{missing_train_features}"
+                )
+
+            if missing_test_features:
+                raise RuntimeError(
+                    f"Missing configured TEST features: "
+                    f"{missing_test_features}"
+                )
+
+            # Pass exactly the requested feature set to sklearn.
+            # Auxiliary columns used for trajectory construction or
+            # weighting cannot silently leak into the model.
+            train_X_pd = m_train_pd[
+                configured_model_features
+            ].copy()
+
+            test_X_pd = m_test_pd[
+                configured_model_features
+            ].copy()
+
+        else:
+            train_X_pd = m_train_pd.drop(
+                columns=[attacker_col_name],
+            )
+
+            test_X_pd = m_test_pd.drop(
+                columns=[attacker_col_name],
+            )
+
+            if "coreData_id" in train_X_pd.columns:
+                train_X_pd = train_X_pd.drop(
+                    columns=["coreData_id"]
+                )
+
+            if "coreData_id" in test_X_pd.columns:
+                test_X_pd = test_X_pd.drop(
+                    columns=["coreData_id"]
+                )
+
+        # Historical All3Ids timestamp encoding
+        #
+        # metadata_receivedAt is stored in the source data as a timestamp
+        # string. The historical All3Ids feature sets included this field
+        # directly, so encode the same timestamp as Unix seconds before
+        # passing the final feature matrix to sklearn.
+        if "metadata_receivedAt" in train_X_pd.columns:
+            import pandas as pd
+
+            for dataset_name, frame in [
+                ("TRAIN", train_X_pd),
+                ("TEST", test_X_pd),
+            ]:
+                original_received_at = frame[
+                    "metadata_receivedAt"
+                ]
+
+                parsed_received_at = pd.to_datetime(
+                    original_received_at,
+                    errors="coerce",
+                    utc=True,
+                    format="mixed",
+                )
+
+                bad_count = int(
+                    parsed_received_at.isna().sum()
+                )
+
+                if bad_count:
+                    bad_examples = (
+                        original_received_at[
+                            parsed_received_at.isna()
+                        ]
+                        .astype(str)
+                        .head(10)
+                        .tolist()
+                    )
+
+                    raise ValueError(
+                        f"{dataset_name} metadata_receivedAt "
+                        f"contains {bad_count} unparseable "
+                        f"timestamp values. "
+                        f"Examples={bad_examples}"
+                    )
+
+                # Convert nanoseconds since epoch to seconds.
+                frame["metadata_receivedAt"] = (
+                    parsed_received_at.astype("int64")
+                    / 1_000_000_000.0
+                )
+
+            self.logger.log(
+                "Converted metadata_receivedAt to Unix "
+                "timestamp seconds for ML input."
+            )
+
+        train_sample_weight = None
+
+        if os.environ.get(
+            "VEHICLE_EQUAL_WEIGHT", "0"
+        ) == "1":
+            vehicle_row_counts = (
+                train_vehicle_ids_pd.value_counts()
+            )
+
+            row_vehicle_counts = (
+                train_vehicle_ids_pd.map(
+                    vehicle_row_counts
+                )
+            )
+
+            if row_vehicle_counts.isna().any():
+                raise RuntimeError(
+                    "Failed to map one or more training rows "
+                    "to a vehicle row count"
+                )
+
+            # Initially, each vehicle has total weight 1:
+            # each row gets 1 / number_of_rows_for_vehicle.
+            weights = (
+                1.0
+                / row_vehicle_counts.astype("float64")
+            )
+
+            # Normalize weights to mean 1. This preserves equal total
+            # influence per vehicle while keeping sklearn's effective
+            # total sample weight on the normal numerical scale.
+            weights *= (
+                len(weights) / weights.sum()
+            )
+
+            train_sample_weight = weights.to_numpy(
+                dtype="float64"
+            )
+
+            self.logger.log("")
+            self.logger.log(
+                "VEHICLE-EQUAL TRAINING WEIGHTS ENABLED"
+            )
+            self.logger.log(
+                f"Training vehicles: "
+                f"{train_vehicle_ids_pd.nunique():,}"
+            )
+            self.logger.log(
+                f"Vehicle row-count range: "
+                f"{vehicle_row_counts.min():,} to "
+                f"{vehicle_row_counts.max():,}"
+            )
+            self.logger.log(
+                f"Sample-weight range: "
+                f"{train_sample_weight.min():.10f} to "
+                f"{train_sample_weight.max():.10f}"
+            )
+
+        # Fundamental model-matrix integrity checks.
+        if list(train_X_pd.columns) != list(test_X_pd.columns):
+            raise RuntimeError(
+                "Train/test feature columns differ. "
+                f"Train={list(train_X_pd.columns)}, "
+                f"Test={list(test_X_pd.columns)}"
+            )
+
+        if train_X_pd.columns.duplicated().any():
+            raise RuntimeError(
+                f"Duplicate training feature columns: "
+                f"{train_X_pd.columns[train_X_pd.columns.duplicated()].tolist()}"
+            )
+
+        if len(train_X_pd) != len(train_Y_pd):
+            raise RuntimeError("Training feature/label length mismatch")
+
+        if len(test_X_pd) != len(test_Y_pd):
+            raise RuntimeError("Test feature/label length mismatch")
+
+        # Optional strict model-boundary audit.
+        if os.environ.get("PIPELINE_AUDIT", "0") == "1":
+            import numpy as np
+            import pandas as pd
+
+            self.logger.log("")
+            self.logger.log("=" * 70)
+            self.logger.log("FINAL ML MATRIX AUDIT")
+            self.logger.log("=" * 70)
+
+            for dataset_name, X_pd, Y_pd in [
+                ("TRAIN", train_X_pd, train_Y_pd),
+                ("TEST", test_X_pd, test_Y_pd),
+            ]:
+                self.logger.log("")
+                self.logger.log(f"--- {dataset_name} MATRIX ---")
+                self.logger.log(
+                    f"Shape: {X_pd.shape[0]:,} rows x "
+                    f"{X_pd.shape[1]} features"
+                )
+                self.logger.log(
+                    f"Features: {list(X_pd.columns)}"
+                )
+                self.logger.log(
+                    f"Label dtype: {Y_pd.dtype}"
+                )
+                self.logger.log(
+                    f"Label values: "
+                    f"{sorted(pd.Series(Y_pd).dropna().unique().tolist())}"
+                )
+
+                label_values = set(
+                    pd.Series(Y_pd).dropna().unique().tolist()
+                )
+
+                if not label_values.issubset({0, 1}):
+                    raise ValueError(
+                        f"{dataset_name} has invalid label values: "
+                        f"{sorted(label_values)}"
+                    )
+
+                if Y_pd.isna().any():
+                    raise ValueError(
+                        f"{dataset_name} contains NaN labels"
+                    )
+
+                y_values = Y_pd.to_numpy()
+
+                for col in X_pd.columns:
+                    series = X_pd[col]
+
+                    self.logger.log(
+                        f"{dataset_name} FEATURE {col}: "
+                        f"dtype={series.dtype}"
+                    )
+
+                    # Every sklearn feature in these experiments must be numeric.
+                    if not pd.api.types.is_numeric_dtype(series.dtype):
+                        converted = pd.to_numeric(
+                            series,
+                            errors="coerce"
+                        )
+
+                        bad_mask = (
+                            series.notna()
+                            & converted.isna()
+                        )
+
+                        bad_examples = (
+                            series[bad_mask]
+                            .astype(str)
+                            .head(10)
+                            .tolist()
+                        )
+
+                        raise TypeError(
+                            f"{dataset_name} feature {col!r} is "
+                            f"non-numeric (dtype={series.dtype}). "
+                            f"Failed numeric conversions="
+                            f"{int(bad_mask.sum())}. "
+                            f"Examples={bad_examples}"
+                        )
+
+                    values = pd.to_numeric(
+                        series,
+                        errors="coerce"
+                    ).to_numpy(dtype="float64")
+
+                    nan_count = int(np.isnan(values).sum())
+                    inf_count = int(np.isinf(values).sum())
+
+                    if nan_count or inf_count:
+                        raise ValueError(
+                            f"{dataset_name} feature {col!r}: "
+                            f"NaN={nan_count}, Inf={inf_count}"
+                        )
+
+                    clean_values = values[y_values == 0]
+                    attacker_values = values[y_values == 1]
+
+                    clean_mean = (
+                        float(clean_values.mean())
+                        if len(clean_values)
+                        else float("nan")
+                    )
+
+                    attacker_mean = (
+                        float(attacker_values.mean())
+                        if len(attacker_values)
+                        else float("nan")
+                    )
+
+                    if np.std(values) > 0 and np.std(y_values) > 0:
+                        correlation = float(
+                            np.corrcoef(values, y_values)[0, 1]
+                        )
+                    else:
+                        correlation = float("nan")
+
+                    self.logger.log(
+                        f"  min={values.min():.6f}, "
+                        f"max={values.max():.6f}, "
+                        f"mean={values.mean():.6f}, "
+                        f"std={values.std():.6f}, "
+                        f"clean_mean={clean_mean:.6f}, "
+                        f"attacker_mean={attacker_mean:.6f}, "
+                        f"label_corr={correlation:.6f}"
+                    )
+
+            self.logger.log("")
+            self.logger.log("FINAL ML MATRIX AUDIT PASSED")
+            self.logger.log("=" * 70)
+
         actual_train_size = len(train_X_pd)
         actual_test_size = len(test_X_pd)
         
@@ -822,9 +1943,15 @@ class DaskPipelineRunner:
         for classifier_instance in mcp.classifier_instances:
             classifier_name = classifier_instance.__class__.__name__
             self.logger.log(f"Creating MDataClassifier for {classifier_name}...")
-            mcp.classifiers.append(
-                MDataClassifier(classifier_instance, train_X_pd, train_Y_pd, test_X_pd, test_Y_pd)
+            mdata_classifier = MDataClassifier(
+                classifier_instance,
+                train_X_pd,
+                train_Y_pd,
+                test_X_pd,
+                test_Y_pd,
             )
+            mdata_classifier.sample_weight = train_sample_weight
+            mcp.classifiers.append(mdata_classifier)
         self.logger.log(f"Initialized {len(mcp.classifiers)} classifiers")
 
         mcp.train()

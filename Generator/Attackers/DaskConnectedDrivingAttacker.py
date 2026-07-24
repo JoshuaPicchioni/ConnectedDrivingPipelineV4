@@ -361,20 +361,80 @@ class DaskConnectedDrivingAttacker(IConnectedDrivingAttacker):
             f"min_dist={min_dist}m, max_dist={max_dist}m"
         )
 
-        # First, get unique attacker IDs (requires one compute)
-        # This is acceptable because we need to create a lookup table
-        attacker_mask_col = self.data['isAttacker'] == 1
-        attacker_ids = self.data[attacker_mask_col]['coreData_id'].unique().compute()
-        
-        # Generate random direction/distance per ID
-        rng = np.random.RandomState(self.SEED)
-        direction_distance_lookup = {
-            vehicle_id: {
-                "direction": float(rng.randint(0, 360)),
-                "distance": float(rng.randint(min_dist, max_dist))
+        # First, get unique attacker IDs.
+        # Sort for deterministic lookup construction and logging.
+        attacker_mask_col = (
+            self.data["isAttacker"] == 1
+        )
+
+        attacker_ids = sorted(
+            self.data[
+                attacker_mask_col
+            ]["coreData_id"]
+            .unique()
+            .compute()
+            .tolist(),
+            key=lambda value: str(value),
+        )
+
+        # Generate one deterministic continuous offset per
+        # vehicle ID. The seed depends on both the experiment
+        # seed and vehicle ID, so results do not depend on
+        # Dask partition order.
+        import zlib
+
+        direction_distance_lookup = {}
+
+        for vehicle_id in attacker_ids:
+
+            vehicle_seed_offset = (
+                zlib.crc32(
+                    str(
+                        vehicle_id
+                    ).encode(
+                        "utf-8"
+                    )
+                )
+                & 0xFFFFFFFF
+            )
+
+            vehicle_seed = int(
+                np.random.SeedSequence(
+                    [
+                        int(
+                            self.SEED
+                        ),
+                        int(
+                            vehicle_seed_offset
+                        ),
+                    ]
+                )
+                .generate_state(
+                    1,
+                    dtype=np.uint32,
+                )[0]
+            )
+
+            rng = np.random.RandomState(
+                vehicle_seed
+            )
+
+            direction_distance_lookup[
+                vehicle_id
+            ] = {
+                "direction": float(
+                    rng.uniform(
+                        0.0,
+                        360.0,
+                    )
+                ),
+                "distance": float(
+                    rng.uniform(
+                        min_dist,
+                        max_dist,
+                    )
+                ),
             }
-            for vehicle_id in attacker_ids
-        }
         
         self.logger.log(f"Created lookup table for {len(direction_distance_lookup)} attacker IDs")
 

@@ -187,68 +187,82 @@ class DaskConnectedDrivingCleaner(IConnectedDrivingCleaner):
 
     def convert_to_XY_Coordinates(self):
         """
-        Convert lat/long coordinates to XY distance from origin point.
+        Convert WGS84 longitude/latitude to signed local XY
+        coordinates in meters.
 
-        This method replicates the EXACT logic from the pandas version, even though
-        the parameter semantics are confusing. The pandas code passes parameters in
-        a way that doesn't match the function signature documentation, but we must
-        replicate this for equivalence.
+        After WKT POINT parsing:
+          - x_pos contains longitude in degrees
+          - y_pos contains latitude in degrees
 
-        Pandas equivalent:
-            df["x_pos"] = df["x_pos"].map(lambda x: MathHelper.dist_between_two_points(x, self.y_pos, self.x_pos, self.y_pos))
-            df["y_pos"] = df["y_pos"].map(lambda y: MathHelper.dist_between_two_points(self.x_pos, y, self.x_pos, self.y_pos))
+        Configured origin:
+          - self.x_pos = center longitude
+          - self.y_pos = center latitude
 
-        Where:
-            - x is the current row's x_pos (longitude from POINT parsing)
-            - y is the current row's y_pos (latitude from POINT parsing)
-            - self.x_pos is the origin latitude (confusingly named)
-            - self.y_pos is the origin longitude (confusingly named)
+        A local equirectangular projection is used:
 
-        Returns:
-            self: For method chaining
+          x = R * (lon - lon0) * cos(lat0)
+          y = R * (lat - lat0)
+
+        with angular values in radians.
+
+        Direction is therefore preserved:
+          east  -> +x
+          west  -> -x
+          north -> +y
+          south -> -y
         """
-        # OPTIMIZATION: Use map_partitions to compute both coordinate transformations
-        # in a single pass. This is 30-40% faster than two separate apply() calls
-        # because it processes both columns together within each partition.
+        import numpy as np
 
-        def _convert_xy_coords_partition(partition: pd.DataFrame) -> pd.DataFrame:
-            """
-            Convert x_pos and y_pos to geodesic distances in a single partition pass.
-            
-            FIXED BUG: Previous code had incorrect parameter order for geodesic_distance().
-            geodesic_distance expects (lat1, lon1, lat2, lon2).
-            
-            After POINT parsing:
-              - x_pos contains LONGITUDE (x = current_lon)
-              - y_pos contains LATITUDE (y = current_lat)
-            
-            Config variables (confusingly named):
-              - self.x_pos = center_longitude (ref_lon)
-              - self.y_pos = center_latitude (ref_lat)
-            
-            For x_pos (distance EAST, same latitude):
-              geodesic_distance(ref_lat, current_lon, ref_lat, ref_lon)
-            
-            For y_pos (distance NORTH, same longitude):
-              geodesic_distance(current_lat, ref_lon, ref_lat, ref_lon)
-            """
-            # x_pos conversion: distance EAST from reference (same latitude, different longitude)
-            # geodesic_distance(ref_lat, current_lon, ref_lat, ref_lon)
-            partition['x_pos'] = partition['x_pos'].apply(
-                lambda x: geodesic_distance(self.y_pos, x, self.y_pos, self.x_pos)
+        earth_radius_m = 6371008.8
+
+        center_lon_rad = np.deg2rad(
+            float(self.x_pos)
+        )
+
+        center_lat_rad = np.deg2rad(
+            float(self.y_pos)
+        )
+
+        cos_center_lat = float(
+            np.cos(center_lat_rad)
+        )
+
+        def _convert_xy_coords_partition(
+            partition: pd.DataFrame
+        ) -> pd.DataFrame:
+
+            partition = partition.copy()
+
+            lon_rad = np.deg2rad(
+                partition["x_pos"].astype(
+                    "float64"
+                )
             )
 
-            # y_pos conversion: distance NORTH from reference (different latitude, same longitude)
-            # geodesic_distance(current_lat, ref_lon, ref_lat, ref_lon)
-            partition['y_pos'] = partition['y_pos'].apply(
-                lambda y: geodesic_distance(y, self.x_pos, self.y_pos, self.x_pos)
+            lat_rad = np.deg2rad(
+                partition["y_pos"].astype(
+                    "float64"
+                )
+            )
+
+            partition["x_pos"] = (
+                earth_radius_m
+                * (lon_rad - center_lon_rad)
+                * cos_center_lat
+            )
+
+            partition["y_pos"] = (
+                earth_radius_m
+                * (lat_rad - center_lat_rad)
             )
 
             return partition
 
-        self.cleaned_data = self.cleaned_data.map_partitions(
-            _convert_xy_coords_partition,
-            meta=self.cleaned_data._meta
+        self.cleaned_data = (
+            self.cleaned_data.map_partitions(
+                _convert_xy_coords_partition,
+                meta=self.cleaned_data._meta,
+            )
         )
 
         return self

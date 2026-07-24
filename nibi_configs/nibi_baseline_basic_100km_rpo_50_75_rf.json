@@ -1,5 +1,5 @@
 {
-  "pipeline_name": "nibi_baseline_basic_100km_rpo_50_75_rf_schemafix",
+  "pipeline_name": "nibi_vehicle_disjoint_basic_100km_rpo_50_75_rf_parallel12",
   "version": "2.0.0",
   "created": "2026-02-23",
   "template_generated": true,
@@ -73,7 +73,7 @@
     "attack_dataset": "cache/matrix/basic_100km_rand/attack.parquet"
   },
   "output": {
-    "results_dir": "results/nibi_baseline_basic_100km_rpo_50_75_rf/",
+    "results_dir": "results/nibi_vehicle_disjoint_basic_100km_rpo_50_75_rf_v1/",
     "log_dir": "logs/"
   },
   "dask": {

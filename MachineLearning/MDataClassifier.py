@@ -38,7 +38,40 @@ class MDataClassifier:
         # start time
         start_time = time.time()
 
-        self.classifier.fit(self.train_X, self.train_Y)
+        # Optional per-sample weighting. The pipeline can attach
+        # self.sample_weight before training.
+        sample_weight = getattr(self, "sample_weight", None)
+
+        if sample_weight is not None:
+            import inspect
+
+            fit_parameters = inspect.signature(
+                self.classifier.fit
+            ).parameters
+
+            if "sample_weight" in fit_parameters:
+                self.logger.log(
+                    "Training with per-sample vehicle-equalizing weights"
+                )
+                self.classifier.fit(
+                    self.train_X,
+                    self.train_Y,
+                    sample_weight=sample_weight,
+                )
+            else:
+                self.logger.log(
+                    f"{self.classifier.__class__.__name__} does not "
+                    f"support sample_weight; training unweighted"
+                )
+                self.classifier.fit(
+                    self.train_X,
+                    self.train_Y,
+                )
+        else:
+            self.classifier.fit(
+                self.train_X,
+                self.train_Y,
+            )
 
         # elapsed time in seconds
         self.elapsed_train_time = time.time() - start_time

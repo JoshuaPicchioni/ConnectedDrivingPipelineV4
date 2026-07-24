@@ -90,9 +90,24 @@ class DaskCleanWithTimestamps(DaskConnectedDrivingCleaner):
         Raises:
             ValueError: If data is not a valid Dask DataFrame
         """
+        # The selected input columns must be part of the cache identity.
+        # Otherwise a cached cleaned dataset created for a smaller feature
+        # set can be incorrectly reused by a later experiment that requests
+        # additional raw columns such as coreData_msgCnt or
+        # metadata_receivedAt.
+        selected_columns_cache_key = tuple(
+            sorted(str(column) for column in self.columns)
+        )
+
         self.cleaned_data = self._clean_data_with_timestamps(cache_variables=[
-            self.__class__.__name__, self.isXYCoords,
-            self.clean_params, self.filename, self.x_pos, self.y_pos
+            self.__class__.__name__,
+            self.isXYCoords,
+            self.clean_params,
+            self.filename,
+            self.x_pos,
+            self.y_pos,
+            "columns-aware-v2",
+            selected_columns_cache_key,
         ])
         return self
 
