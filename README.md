@@ -1,767 +1,718 @@
 # ConnectedDrivingPipelineV4
 
-A high-performance, Dask-powered pipeline for connected driving dataset processing and machine learning. This framework provides a unified, config-driven approach to BSM (Basic Safety Message) data analysis, attack simulation, and ML classifier training.
+A config-driven, Dask-based research pipeline for processing large connected-vehicle Basic Safety Message (BSM) datasets, injecting controlled position-falsification attacks, engineering temporal trajectory-consistency features, and evaluating classical machine-learning detectors.
 
-## Overview
+> **Project lineage**
+>
+> This repository is a research fork of the ConnectedDrivingPipelineV4 work originally started by **Aaron Collins**. The current fork has been substantially extended by **Joshua Picchioni** for thesis research involving real-world Wyoming Connected Vehicle Pilot data, vehicle-disjoint evaluation, deterministic attack injection, trajectory-consistency features, large experiment sweeps, audit tooling, and feature-importance analysis.
 
-ConnectedDrivingPipelineV4 is a complete rewrite of the original pandas-based pipeline, now leveraging **Dask** for distributed computing on a 64GB single-node workstation. The migration enables processing of 15M+ row datasets with significantly improved performance and memory efficiency.
+## Project Status
 
-**Key Features:**
-- **Unified Pipeline Runner**: Single `DaskPipelineRunner` replaces 55+ individual pipeline scripts
-- **Config-Driven**: JSON-based configuration for reproducible experiments
-- **Scalable**: Handles 15M+ rows on 64GB RAM (pandas struggled at 5M rows)
-- **Fast**: 2-4x speedup on data cleaning and attack simulation operations
-- **Efficient Caching**: Parquet-based caching with ≥85% hit rates
-- **Production Ready**: Comprehensive testing, validation, and monitoring tools
+**Status:** Active research software  
+**Primary use case:** Misbehaviour detection for connected-vehicle position falsification  
+**Current platform:** Python 3.11, Dask, scikit-learn, Apache Arrow/Parquet, Slurm  
+**Primary compute environment:** Digital Research Alliance of Canada Nibi cluster  
+**Last major research update:** July 2026
 
-## Quick Start
+This repository should be treated as a reproducible research pipeline rather than a general-purpose production service. Many scripts and configuration directories correspond to specific thesis experiments and are intentionally retained for traceability.
 
-### Prerequisites
+## Research Overview
 
-**Hardware Requirements:**
-- **RAM:** 64GB (minimum) - **critical requirement**
-- **CPU:** 6+ cores (12 cores recommended)
-- **Storage:** 500GB+ SSD (1TB+ recommended for caching)
+The pipeline evaluates whether position-falsification attacks can be detected when they are injected into **real connected-vehicle telemetry** rather than fully simulated traffic.
 
-**Software Requirements:**
-- Python 3.10+ (3.10, 3.11, or 3.12 supported - **NOT** 3.8 or 3.9)
-- Linux/macOS (Windows may work but not tested)
+The principal dataset is the April 2021 Wyoming Connected Vehicle Pilot BSM collection:
 
-### Installation
+- approximately **13.3 million source records**
+- approximately **69 source columns**
+- stored as Parquet for scalable processing
+- analyzed in three 100 km regional subsets:
+  - Rock Springs
+  - Laramie
+  - Evanston
 
-1. **Clone the repository:**
-```bash
-git clone https://github.com/aaron777collins/ConnectedDrivingPipelineV4.git
-cd ConnectedDrivingPipelineV4
+The current research focuses on two attack mechanisms:
+
+- **Random Position Offset (RPO):** each malicious BSM receives a newly sampled position offset.
+- **Constant Position Offset (CPO):** each malicious vehicle receives one deterministic position-offset vector that remains fixed across its messages.
+
+These attacks behave differently under temporal analysis:
+
+- RPO disrupts message-to-message trajectory consistency.
+- CPO translates an entire trajectory while largely preserving its local motion.
+
+That distinction is central to the final experiments.
+
+## Major Capabilities
+
+- Unified JSON-configured `DaskPipelineRunner`
+- Dask-based processing of multi-million-row BSM datasets
+- Parquet-based intermediate storage and cache isolation
+- Signed local Cartesian coordinate projection
+- Vehicle-level attacker assignment
+- Vehicle-disjoint train/test splitting
+- Deterministic RPO and CPO generation
+- Temporal trajectory construction by vehicle and timestamp
+- Raw BSM and engineered trajectory feature families
+- Random Forest, Decision Tree, and K-Nearest Neighbors evaluation
+- Accuracy, precision, recall, specificity, confusion matrix, and F1 reporting
+- Train/test generalization-gap analysis
+- Natural trajectory-residual analysis
+- Test-set permutation feature importance
+- Slurm array-job generation and execution
+- Pipeline and attack audit modes
+- Reproducible experiment extraction into consolidated CSV files
+
+## Important Differences from the Original Pipeline
+
+The current fork includes several research-critical changes beyond the earlier Dask migration:
+
+1. **Vehicle-disjoint evaluation**
+
+   Unique `coreData_id` values are partitioned before model training. All BSM records from a vehicle remain entirely in the training or test partition. This prevents the same temporary vehicle identity and adjacent trajectory records from appearing on both sides of the evaluation boundary.
+
+2. **Global vehicle-level attacker assignment**
+
+   Attacker status is assigned at the vehicle level before row-level attack generation. The configured attacker ratio therefore represents compromised vehicles rather than independently selected messages.
+
+3. **Signed regional coordinates**
+
+   Latitude and longitude are projected into signed local planar coordinates:
+
+   - east: positive `x_pos`
+   - west: negative `x_pos`
+   - north: positive `y_pos`
+   - south: negative `y_pos`
+
+4. **Deterministic CPO injection**
+
+   CPO offsets are reproducible and stable per vehicle, independent of Dask partition order.
+
+5. **Trajectory-consistency engineering**
+
+   The pipeline now evaluates whether consecutive positions are consistent with reported speed, heading, elapsed time, acceleration, and turn behaviour.
+
+6. **Cache isolation and validation**
+
+   Cache identities incorporate pipeline versions, selected columns, extracted support columns, and experiment configuration. This prevents stale or incompatible cached datasets from being reused silently.
+
+7. **Runtime auditing**
+
+   Optional audits verify:
+
+   - train/test vehicle separation
+   - binary attacker labels
+   - required feature columns
+   - finite model matrices
+   - unchanged benign positions
+   - configured attack ranges
+   - constant per-vehicle CPO vectors
+   - reproducible experiment structure
+
+8. **Under-the-radar attack testing**
+
+   The displacement sweep now extends down to **0.1–0.5 m**, allowing the models to be tested when injected offsets approach the scale of natural short-term trajectory variation.
+
+9. **Held-out permutation feature importance**
+
+   The repository includes a model-agnostic feature-importance workflow using attacker-class F1 on a deterministic sample of the held-out test set.
+
+## Feature Families
+
+### Historical Raw BSM Features
+
+These configurations use unmodified fields already present in each BSM.
+
+| Reporting name | Legacy config name | Features |
+|---|---|---|
+| Raw Spatial | `basic` | `x_pos`, `y_pos`, `coreData_elevation` |
+| Raw Vehicle State | `movement` | Raw Spatial + `coreData_speed`, `coreData_heading`, `coreData_accelset_accelYaw` |
+| Raw Vehicle State and Accuracy | `extended` | Raw Vehicle State + `coreData_accuracy_semiMajor` |
+
+Historical experiments also include variants with:
+
+- `coreData_id`
+- `coreData_msgCnt`
+- `metadata_receivedAt`
+
+These identifier-related fields are analyzed separately because they do not directly represent physical vehicle behaviour.
+
+### Trajectory-Consistency Features
+
+The thesis and current documentation use descriptive reporting names to avoid confusion with the historical raw feature tiers.
+
+| Reporting name | Legacy config name | Features |
+|---|---|---|
+| Position Baseline | `xy` | `x_pos`, `y_pos` |
+| Step Displacement | `basic` | Position Baseline + `traj_step_distance_m` |
+| Motion Consistency | `movement` | Step Displacement + `traj_distance_error_m`, `traj_heading_error_deg` |
+| Full Kinematic Consistency | `extended` | Motion Consistency + `traj_position_prediction_error_m`, `traj_speed_error_mps`, `traj_accel_mps2`, `traj_turn_change_deg` |
+
+Current engineered columns:
+
+- `traj_step_distance_m`
+- `traj_distance_error_m`
+- `traj_heading_error_deg`
+- `traj_position_prediction_error_m`
+- `traj_speed_error_mps`
+- `traj_accel_mps2`
+- `traj_turn_change_deg`
+
+Support fields such as timestamps, speed, heading, original position, and vehicle identity may be required to calculate trajectory features without automatically being passed into the classifier.
+
+### Identifier Variants
+
+Trajectory configurations are evaluated:
+
+- without `coreData_id`
+- with `coreData_id`
+
+The identifier is useful for grouping messages into trajectories, but direct inclusion as a numeric classifier feature can cause overfitting under vehicle-disjoint evaluation.
+
+## Experiment Matrix
+
+The completed thesis result matrix contains **3,312 classifier-level evaluations** before the separate feature-importance sweep.
+
+### Original displacement ranges
+
+- 5–15 m
+- 10–30 m
+- 30–70 m
+- 50–150 m
+- 100–200 m
+- 150–250 m
+- 200–400 m
+- 400–600 m
+
+### Small-displacement ranges
+
+- 0.5–1.5 m
+- 1–3 m
+- 2–5 m
+- 3–7 m
+- 5–10 m
+
+### Under-the-radar range
+
+- 0.1–0.5 m
+
+### Shared dimensions
+
+- 2 attack types: RPO and CPO
+- 3 regions: Rock Springs, Laramie, Evanston
+- 3 classifiers: Random Forest, Decision Tree, KNN
+- raw and trajectory feature families
+- with-ID and no-ID variants where applicable
+
+## Key Research Findings
+
+The repository contains the exact configs and logs used to produce the thesis result tables. The high-level findings are:
+
+- Adding plausible raw BSM fields does not automatically improve attack detection.
+- Raw speed, heading, yaw acceleration, and positional accuracy can reduce generalization when they are supplied independently of the attacked position.
+- Explicit trajectory-consistency features strongly improve RPO detection.
+- CPO remains difficult because a constant translation preserves local trajectory shape.
+- Direct numeric inclusion of `coreData_id` substantially increases train/test generalization gaps.
+- Small RPO offsets remain detectable by tree models when temporal inconsistencies are exposed.
+- KNN becomes substantially weaker in the smallest under-the-radar conditions.
+- No single feature representation is sufficient for every position-falsification mechanism.
+
+## Natural Trajectory Residual Analysis
+
+`analyze_natural_position_offness.py` estimates a one-step kinematic position-prediction residual using:
+
+- previous reported position
+- previous reported speed
+- previous reported heading
+- elapsed time
+- next reported position
+
+This residual is **not GPS ground-truth error**. It measures the combined real-world variation that a short-term trajectory detector must distinguish from an injected attack.
+
+For the trajectory-valid population used in the analysis:
+
+- observations: approximately 7.80 million
+- median residual: approximately 0.25 m
+- mean residual: approximately 0.75 m
+- 95th percentile: approximately 2.49 m
+- 99th percentile: approximately 4.41 m
+
+The 0.1–0.5 m and 0.5–1.5 m experiments therefore stress the detector in ranges that overlap strongly with ordinary short-term variation.
+
+## Feature Importance
+
+The feature-importance workflow combines all final physical and trajectory variables, including `coreData_id`, and evaluates them for each trained classifier.
+
+Current combined feature list:
+
+```text
+x_pos
+y_pos
+coreData_elevation
+coreData_speed
+coreData_heading
+coreData_accelset_accelYaw
+coreData_accuracy_semiMajor
+traj_step_distance_m
+traj_distance_error_m
+traj_heading_error_deg
+traj_position_prediction_error_m
+traj_speed_error_mps
+traj_accel_mps2
+traj_turn_change_deg
+coreData_id
 ```
 
-2. **Create virtual environment:**
+Method:
+
+- held-out test-set permutation importance
+- attacker-class F1 scorer
+- deterministic stratified test sample
+- repeated shuffling
+- Random Forest, Decision Tree, and KNN
+- optional native tree importance retained for comparison
+
+Relevant files:
+
+```text
+scripts/generate_feature_importance_configs.py
+scripts/run_feature_importance.py
+feature_importance_array.slurm
+nibi_configs/final_feature_importance_combined/
+results/feature_importance_combined/
+```
+
+## Repository Layout
+
+The exact contents may evolve, but the main research paths are:
+
+```text
+ConnectedDrivingPipelineV4/
+├── Generator/
+│   ├── Attackers/
+│   └── Cleaners/
+├── Gatherer/
+├── MachineLearning/
+│   ├── DaskPipelineRunner.py
+│   ├── DaskMClassifierPipeline.py
+│   └── MDataClassifier.py
+├── Helpers/
+├── Logger/
+├── ServiceProviders/
+├── scripts/
+├── nibi_configs/
+│   ├── final_good_trajectory/
+│   ├── final_good_small_ranges/
+│   ├── final_good_under_radar/
+│   ├── final_bad_historical/
+│   └── final_feature_importance_combined/
+├── slurm_feature_importance/
+├── results/
+├── run_config.py
+└── README.md
+```
+
+Important research scripts include:
+
+```text
+scripts/generate_final_good.py
+scripts/generate_final_historical.py
+scripts/generate_small_range_good.py
+scripts/generate_under_radar.py
+scripts/generate_feature_importance_configs.py
+scripts/run_feature_importance.py
+extract_final_good_results.py
+analyze_natural_position_offness.py
+```
+
+## Requirements
+
+### Software
+
+- Python 3.11 recommended
+- Dask and Distributed
+- pandas
+- NumPy
+- scikit-learn
+- PyArrow
+- matplotlib
+- joblib
+- python-dateutil
+
+Install the repository requirements:
+
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
-
-3. **Install dependencies:**
-```bash
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-4. **Verify Dask setup:**
-```bash
-python validate_dask_setup.py
+### Hardware
+
+Requirements depend heavily on the selected region, feature set, classifier, and cache state.
+
+For the full Wyoming experiments, the pipeline has been run using:
+
+- 12 CPU cores per Slurm task
+- approximately 56–64 GB RAM per task
+- local scratch storage
+- Parquet source and cache files
+
+Small local smoke tests can use fewer resources, but the full experiment matrix is intended for a high-memory workstation or HPC cluster.
+
+## Data
+
+The full Wyoming dataset is not included in this repository.
+
+Expected thesis source path on Nibi:
+
+```text
+$SCRATCH/wyoming_april_2021/data/April_2021_Wyoming_Data_Fixed.parquet
 ```
 
-Expected output:
-```
-✅ All Dask dependencies installed correctly
-✅ 64GB RAM detected (sufficient for 15M rows)
-✅ Dask LocalCluster initialized successfully
-✅ System ready for production workloads
-```
+Example source characteristics:
 
-### Docker Deployment (Alternative)
-
-For containerized deployment with Docker:
-
-```bash
-# Build the Docker image
-docker compose build
-
-# Validate Dask setup inside the container
-docker compose run --rm pipeline python validate_dask_setup.py
-
-# Expected output:
-# ✅ All Dask dependencies installed correctly
-# ✅ 64GB RAM detected (sufficient for 15M rows)
-# ✅ Dask LocalCluster initialized successfully
-# ✅ System ready for production workloads
-
-# Start the pipeline service
-docker compose up -d pipeline
-
-# Access Dask dashboard at http://localhost:8787
+```text
+Rows: approximately 13,318,200
+Columns: 69
+Format: Parquet
 ```
 
-**Note:** The validation script (`validate_dask_setup.py`) runs 8 comprehensive tests to verify Dask configuration, dependencies, and system resources. This script is included in the Docker image and should always pass before running production workloads.
+Users must obtain and prepare an appropriate BSM dataset separately and update config paths accordingly.
 
-See [DOCKER.md](DOCKER.md) for complete Docker deployment guide, including production configurations, scaling, and monitoring.
+## Running on Nibi
 
-### Basic Usage
-
-#### 1. Run a Pipeline from Config
-
-The easiest way to run a pipeline is using a pre-configured JSON file:
+Log in:
 
 ```bash
-python -c "
+ssh <username>@nibi.alliancecan.ca
+```
+
+Move to the repository and load the tested environment:
+
+```bash
+cd $SCRATCH/wyoming_april_2021/ConnectedDrivingPipelineV4
+
+module load StdEnv/2023
+module load python/3.11
+module load arrow/25.0.0
+
+source ~/connected-driving-env/bin/activate
+```
+
+Run one JSON configuration interactively:
+
+```bash
+python -u run_config.py path/to/config.json
+```
+
+Enable validation audits:
+
+```bash
+export PIPELINE_AUDIT=1
+export PIPELINE_ATTACK_AUDIT=1
+
+python -u run_config.py path/to/config.json
+```
+
+## Slurm Example
+
+A typical array task follows this pattern:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=connected-driving
+#SBATCH --account=<allocation>
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=56G
+#SBATCH --time=08:00:00
+#SBATCH --array=0-47%8
+#SBATCH --output=slurm_logs/job_%A_%a.out
+#SBATCH --error=slurm_logs/job_%A_%a.out
+
+set -uo pipefail
+
+cd "$SCRATCH/wyoming_april_2021/ConnectedDrivingPipelineV4" || exit 1
+
+module load StdEnv/2023
+module load python/3.11
+module load arrow/25.0.0
+source ~/connected-driving-env/bin/activate
+
+export PIPELINE_AUDIT=1
+export PIPELINE_ATTACK_AUDIT=1
+
+CONFIG=$(
+    sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" configs.txt
+)
+
+python -u run_config.py "$CONFIG"
+```
+
+Submit:
+
+```bash
+sbatch experiment_array.slurm
+```
+
+Monitor:
+
+```bash
+squeue -u "$USER"
+sacct -j <job-id> -X --format=JobID,State,Elapsed,ExitCode,MaxRSS
+```
+
+## Running Feature Importance
+
+Generate the combined configs:
+
+```bash
+python scripts/generate_feature_importance_configs.py
+```
+
+Syntax-check the runner:
+
+```bash
+python -m py_compile scripts/run_feature_importance.py
+```
+
+Submit the Slurm array:
+
+```bash
+sbatch feature_importance_array.slurm
+```
+
+Expected output directory:
+
+```text
+results/feature_importance_combined/
+```
+
+Each completed condition writes:
+
+- one CSV containing feature-level importance values
+- one JSON containing run metadata and model summaries
+
+## Configuration Notes
+
+Experiment configurations are JSON files consumed by:
+
+```python
 from MachineLearning.DaskPipelineRunner import DaskPipelineRunner
 
-runner = DaskPipelineRunner.from_config('MClassifierPipelines/configs/example_pipeline.json')
+runner = DaskPipelineRunner.from_config("path/to/config.json")
 results = runner.run()
-print(f'Pipeline complete. Results saved to {runner.csvWriter.filename}')
-"
 ```
 
-#### 2. Create a Custom Configuration
-
-Create a JSON config file (e.g., `my_pipeline.json`):
-
-```json
-{
-  "pipeline_name": "MyFirstPipeline",
-  "data": {
-    "source_file": "data/bsm_data.csv",
-    "filtering": {
-      "type": "xy_offset_position",
-      "distance_meters": 2000,
-      "center_x": -106.0831353,
-      "center_y": 41.5430216
-    },
-    "date_range": {
-      "start_day": 1,
-      "end_day": 30,
-      "start_month": 4,
-      "end_month": 4,
-      "start_year": 2021,
-      "end_year": 2021
-    },
-    "num_subsection_rows": 100000
-  },
-  "features": {
-    "columns": "minimal_xy_elev"
-  },
-  "attacks": {
-    "enabled": true,
-    "attack_ratio": 0.3,
-    "type": "rand_offset",
-    "min_distance": 10,
-    "max_distance": 20,
-    "random_seed": 42
-  },
-  "ml": {
-    "train_test_split": {
-      "type": "random",
-      "train_ratio": 0.8,
-      "test_ratio": 0.2,
-      "random_seed": 42
-    }
-  },
-  "cache": {
-    "enabled": true
-  }
-}
-```
-
-Then run it:
-```bash
-python -c "
-from MachineLearning.DaskPipelineRunner import DaskPipelineRunner
-runner = DaskPipelineRunner.from_config('my_pipeline.json')
-results = runner.run()
-"
-```
-
-#### 3. Programmatic Usage
-
-For Python scripts or notebooks:
+For workflows that need fitted classifiers, exact test matrices, or split metadata:
 
 ```python
-from MachineLearning.DaskPipelineRunner import DaskPipelineRunner
-
-# Define config inline
-config = {
-    "pipeline_name": "ProgrammaticPipeline",
-    "data": {
-        "source_file": "data/bsm_data.csv",
-        "filtering": {
-            "type": "xy_offset_position",
-            "distance_meters": 1000,
-            "center_x": -106.0831353,
-            "center_y": 41.5430216
-        }
-    },
-    "features": {"columns": "minimal_xy_elev"},
-    "attacks": {"enabled": False},
-    "ml": {
-        "train_test_split": {
-            "type": "random",
-            "train_ratio": 0.8,
-            "test_ratio": 0.2
-        }
-    },
-    "cache": {"enabled": True}
-}
-
-# Run pipeline
-runner = DaskPipelineRunner(config)
-results = runner.run()
-
-# Access results
-print(f"Models trained: {len(results)}")
-for model_name, metrics in results.items():
-    print(f"{model_name}: Test Accuracy = {metrics['test_accuracy']:.4f}")
+results, metadata = runner.run_with_metadata()
 ```
 
-## Configuration Reference
+Configuration fields vary between historical and final experiment generations. Current research configs generally include:
 
-### Pipeline Configuration Schema
+- pipeline name and version
+- source file
+- regional filtering
+- source/support columns
+- selected classifier features
+- attacker ratio
+- attack type
+- offset range
+- random seed
+- vehicle-disjoint split behaviour
+- cache identity
+- output paths
+- optional feature-importance metadata
 
-A complete pipeline configuration includes these sections:
+Use the existing generated configs as the authoritative examples for the current schema.
 
-#### `pipeline_name` (string, required)
-Unique identifier for this pipeline run. Used for logging, caching, and output filenames.
+## Reproducibility
 
-#### `data` (object, required)
-Data loading and filtering configuration:
+The final experiments use deterministic settings wherever practical:
 
-```json
-{
-  "source_file": "data/bsm_data.csv",  // Path to source CSV
-  "num_subsection_rows": 100000,       // Rows per partition (default: 100000)
-  "filtering": {
-    "type": "xy_offset_position",      // Filter type: "xy_offset_position", "bounding_box", or "none"
-    "distance_meters": 2000,            // For xy_offset: radius in meters
-    "center_x": -106.0831353,           // Center longitude
-    "center_y": 41.5430216              // Center latitude
-  },
-  "date_range": {
-    "start_day": 1, "end_day": 30,
-    "start_month": 4, "end_month": 4,
-    "start_year": 2021, "end_year": 2021
-  }
-}
-```
+- random seed: 42
+- vehicle-level attack assignment
+- vehicle-disjoint train/test split
+- deterministic per-vehicle CPO vectors
+- deterministic RPO configuration
+- Decision Tree `random_state=42`
+- Random Forest `random_state=42`
+- cache versioning
+- explicit model-boundary feature selection
+- attack and matrix audits
+- saved JSON configs
+- saved Slurm logs
+- consolidated result CSVs
 
-#### `features` (object, required)
-Feature column selection:
+For exact reproduction, preserve:
 
-```json
-{
-  "columns": "minimal_xy_elev"  // Options: "minimal_xy_elev", "extended_timestamps", "all"
-}
-```
+1. the source dataset version
+2. the JSON config
+3. the repository commit
+4. the Python environment
+5. the Slurm resource allocation
+6. audit environment variables
+7. generated logs and result files
 
-Predefined column sets:
-- **`minimal_xy_elev`**: `["latitude", "longitude", "elevation", "speed", "heading"]` (recommended for quick experiments)
-- **`extended_timestamps`**: Minimal + timestamp-related features (13 columns)
-- **`all`**: All available BSM columns (~50 columns)
+## Validation and Auditing
 
-#### `attacks` (object, required)
-Attack simulation configuration:
-
-```json
-{
-  "enabled": true,               // Enable/disable attack simulation
-  "attack_ratio": 0.3,           // Fraction of vehicles to compromise (0.0-1.0)
-  "type": "rand_offset",         // Attack type (see below)
-  "min_distance": 10,            // Minimum position offset (meters)
-  "max_distance": 20,            // Maximum position offset (meters)
-  "random_seed": 42              // For reproducibility
-}
-```
-
-**Attack Types:**
-- **`rand_offset`**: Random position offset per message (10-20m typical)
-- **`const_offset_per_id`**: Fixed offset per vehicle (100-200m typical)
-- **`rand_position`**: Completely random positions within area (0-2000m)
-- **`position_swap`**: Swap positions between pairs of vehicles
-
-#### `ml` (object, required)
-Machine learning configuration:
-
-```json
-{
-  "train_test_split": {
-    "type": "random",            // Split type: "random" or "temporal"
-    "train_ratio": 0.8,          // Training set fraction
-    "test_ratio": 0.2,           // Test set fraction
-    "random_seed": 42            // For reproducibility
-  }
-}
-```
-
-#### `cache` (object, optional)
-Caching configuration:
-
-```json
-{
-  "enabled": true  // Enable Parquet caching (recommended)
-}
-```
-
-When enabled, intermediate results are cached to `cache/` directory using Parquet format. Typical hit rates: ≥85% after first run.
-
-### Configuration Examples
-
-See `MClassifierPipelines/configs/` for 40+ example configurations covering various scenarios:
-- Different attack types and parameters
-- Various spatial filtering approaches
-- Different feature column sets
-- Custom train/test splits
-
-## Architecture
-
-### Pipeline Execution Flow
-
-```
-1. Data Gathering (DaskDataGatherer)
-   ├─ Load CSV → Dask DataFrame (lazy)
-   ├─ Spatial filtering (xy_offset_position)
-   └─ Temporal filtering (date_range)
-
-2. Large Data Cleaning (DaskConnectedDrivingLargeDataCleaner)
-   ├─ Remove invalid coordinates
-   ├─ Filter by date range
-   └─ Deduplicate records
-
-3. Train/Test Split (DaskMConnectedDrivingDataCleaner)
-   ├─ Random split (80/20 default)
-   └─ OR temporal split
-
-4. Attack Simulation (DaskConnectedDrivingAttacker)
-   ├─ Add "is_attacker" column (0/1 labels)
-   ├─ Apply position attacks to attacker vehicles
-   └─ Maintain legitimate vehicle positions
-
-5. ML Preparation (DaskMConnectedDrivingDataCleaner)
-   ├─ Hex → decimal conversion
-   ├─ Feature column selection
-   └─ Label extraction
-
-6. Classifier Training (DaskMClassifierPipeline)
-   ├─ RandomForestClassifier
-   ├─ DecisionTreeClassifier
-   └─ KNeighborsClassifier
-
-7. Results Collection
-   ├─ Accuracy, Precision, Recall, F1, Specificity
-   ├─ Train/test metrics
-   └─ CSV export
-```
-
-### Key Components
-
-#### `DaskPipelineRunner`
-- **Location:** `MachineLearning/DaskPipelineRunner.py`
-- **Purpose:** Main entry point for running ML pipelines
-- **Key Methods:**
-  - `from_config(config_path)`: Load pipeline from JSON file
-  - `run()`: Execute complete pipeline and return results
-
-#### `DaskDataGatherer`
-- **Location:** `Gatherer/DaskDataGatherer.py`
-- **Purpose:** Load CSV data into Dask DataFrame with lazy evaluation
-- **Features:**
-  - Automatic partitioning (64MB blocks = ~225K rows per partition)
-  - Spatial filtering (xy_offset_position)
-  - Temporal filtering (date ranges)
-
-#### `DaskConnectedDrivingLargeDataCleaner`
-- **Location:** `Generator/Cleaners/DaskConnectedDrivingLargeDataCleaner.py`
-- **Purpose:** Large-scale data cleaning and validation
-- **Operations:** Coordinate validation, deduplication, date filtering
-
-#### `DaskConnectedDrivingAttacker`
-- **Location:** `Generator/Attackers/DaskConnectedDrivingAttacker.py`
-- **Purpose:** Simulate GPS position attacks on BSM data
-- **Attack Methods:**
-  - `add_attackers()`: Label vehicles as attackers (0/1)
-  - `positional_offset_rand()`: Random position offsets
-  - `positional_offset_const()`: Fixed offsets per vehicle
-  - `positional_swap_rand()`: Position swapping
-
-#### `DaskMClassifierPipeline`
-- **Location:** `MachineLearning/DaskMClassifierPipeline.py`
-- **Purpose:** Train scikit-learn classifiers on Dask-processed data
-- **Classifiers:** RandomForest, DecisionTree, KNeighbors (extensible)
-
-## Performance
-
-### Benchmarks (15M Row Dataset)
-
-| Operation | Pandas (Old) | Dask (New) | Speedup |
-|-----------|--------------|------------|---------|
-| Data Loading | 180s | 45s | 4.0x |
-| Large Cleaning | 240s | 60s | 4.0x |
-| Attack Simulation | 300s | 120s | 2.5x |
-| Train/Test Split | 90s | 30s | 3.0x |
-| End-to-End Pipeline | ~15 min | ~6 min | 2.5x |
-
-### Memory Usage
-
-| Configuration | Peak Memory | Status |
-|---------------|-------------|--------|
-| 64GB Production | 38-40GB | ✅ Optimal |
-| Development (8 workers) | 42-45GB | ✅ Acceptable |
-| Old Pandas | 55-60GB | ❌ Unstable |
-
-**Note:** With 64GB RAM, you have ~24GB headroom for safety. The pipeline will automatically spill to disk if memory exceeds 50% per worker (configurable in `configs/dask/64gb-production.yml`).
-
-### Cache Performance
-
-With Parquet caching enabled:
-- **First run (cold cache):** 0% hit rate (~6 min for 15M rows)
-- **Second run (warm cache):** ~95% hit rate (~1 min for 15M rows)
-- **Average over 10 runs:** ≥85% hit rate
-
-Monitor cache health:
-```bash
-python scripts/monitor_cache_health.py
-```
-
-## Monitoring & Debugging
-
-### Dask Dashboard
-
-The Dask dashboard provides real-time monitoring of task execution, memory usage, and worker status.
-
-**Access the dashboard:**
-1. Start your pipeline (dashboard auto-launches)
-2. Open browser to `http://localhost:8787`
-3. View:
-   - Task stream (execution timeline)
-   - Memory usage per worker
-   - Task graph
-   - Worker status
-
-### Logging
-
-All pipeline operations are logged to `logs/<pipeline_name>.log`:
+### Pipeline audit
 
 ```bash
-tail -f logs/MyFirstPipeline.log
+export PIPELINE_AUDIT=1
 ```
 
-**Log Levels:**
-- **INFO:** Normal operations (data loading, cleaning, training)
-- **WARNING:** Performance issues (slow operations, high memory)
-- **ERROR:** Failures (missing files, invalid configs)
+Checks model matrices for issues such as:
 
-### Cache Monitoring
+- missing configured features
+- unexpected support columns
+- nonnumeric values
+- NaN or infinite values
+- label/feature inconsistencies
 
-Check cache statistics:
-```bash
-python scripts/monitor_cache_health.py
-
-# Output:
-# ✅ Cache Hit Rate: 87.3% (EXCELLENT - meets ≥85% target)
-# 📊 Total Cached Entries: 142
-# 💾 Total Cache Size: 8.4 GB
-# 🔝 Top 5 Entries by Access Count:
-#   1. gather_data_april2021 (hits: 234, size: 2.1GB)
-#   2. clean_large_data_2000m (hits: 198, size: 1.8GB)
-#   ...
-```
-
-Cleanup old cache entries:
-```bash
-python scripts/monitor_cache_health.py --cleanup --max-size-gb 50
-```
-
-### Profiling
-
-For performance analysis:
-```bash
-# Enable profiling in Dask config
-export DASK_CONFIG=configs/dask/64gb-production.yml
-
-# Run pipeline with profiling
-python your_pipeline_script.py
-
-# View profile results in Dask dashboard
-# Navigate to http://localhost:8787/profile
-```
-
-## Testing
-
-### CI/CD Pipeline
-
-The project includes automated testing via GitHub Actions. Every push and pull request triggers:
-- Unit tests across Python 3.10, 3.11, 3.12
-- Code quality checks (flake8, black, isort)
-- Integration and slow tests
-- Docker build validation
-- Coverage reporting (70% minimum threshold)
-
-**CI Status:**
-- Tests run automatically on push to `main`, `master`, or `develop` branches
-- Pull requests are tested before merge
-- Coverage reports are archived as artifacts for 30 days
-- See [CI_CD.md](CI_CD.md) for complete CI/CD documentation
-
-### Run All Tests
+### Attack audit
 
 ```bash
-pytest Test/ -v
+export PIPELINE_ATTACK_AUDIT=1
 ```
 
-### Run Specific Test Suites
+Checks properties such as:
+
+- binary labels
+- benign positions unchanged
+- attacker offsets within the configured interval
+- constant CPO displacement per vehicle
+- train and test attack generation
+
+### Vehicle-disjoint verification
+
+Final runs report the number of train and test vehicle IDs and verify that their intersection is empty.
+
+## Result Files
+
+Major consolidated outputs include:
+
+```text
+final_good_all_results.csv
+all_final_experiment_results.csv
+natural_offness_summary.csv
+natural_offness_thresholds.csv
+natural_offness_vehicle_summary.csv
+```
+
+The combined result table includes:
+
+- experiment group
+- attack type
+- region
+- displacement range
+- feature set
+- identifier variant
+- classifier
+- train metrics
+- test metrics
+- pipeline/config references
+- log references
+
+## Known Limitations
+
+- Attacks are synthetically injected into real telemetry.
+- The evaluation uses one connected-vehicle deployment.
+- CPO cannot be reliably exposed by local trajectory consistency alone.
+- Temporary vehicle identifiers are dataset-specific and nonphysical.
+- KNN is sensitive to feature scaling and high-dimensional numeric inputs.
+- Feature importance describes how a fitted model uses the evaluated dataset; it is not a universal causal ranking.
+- Natural kinematic residual is not GPS ground-truth error.
+- Large experiments require substantial RAM, CPU time, and storage.
+- Some research directories contain legacy names retained for result reproducibility.
+
+## Development Guidance
+
+Before committing a new experiment:
+
+1. create a unique pipeline name
+2. assign a new cache/version identifier
+3. explicitly define model features
+4. keep support columns separate from model inputs
+5. use a deterministic random seed
+6. run both audit modes
+7. validate config counts
+8. run one smoke-test task
+9. inspect the complete log
+10. launch the full Slurm array
+11. verify expected result counts
+12. archive configs, logs, scripts, and extracted results
+
+Basic syntax checks:
 
 ```bash
-# Core Dask components
-pytest Test/test_dask_data_gatherer.py -v
-pytest Test/test_dask_cleaners.py -v
-pytest Test/test_dask_attackers.py -v
-
-# Pipeline integration
-pytest Test/test_dask_pipeline_runner.py -v
-
-# Performance validation
-pytest Test/test_performance_15m_rows.py -v
-
-# Cache system
-pytest Test/test_cache_hit_rate.py -v
+python -m py_compile MachineLearning/DaskPipelineRunner.py
+python -m py_compile scripts/run_feature_importance.py
 ```
 
-### Expected Test Results
+Repository status:
 
-All tests should pass with ≥80% coverage:
-```
-==================== test session starts ====================
-collected 127 items
-
-Test/test_dask_data_gatherer.py ................... [ 15%]
-Test/test_dask_cleaners.py ........................ [ 34%]
-Test/test_dask_attackers.py ....................... [ 50%]
-Test/test_dask_pipeline_runner.py ................. [ 66%]
-Test/test_performance_15m_rows.py ................. [ 82%]
-Test/test_cache_hit_rate.py ....................... [100%]
-
-==================== 127 passed in 45.23s ====================
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Out of Memory Errors
-
-**Symptom:** `MemoryError` or worker crashes
-**Solution:**
 ```bash
-# Check available RAM
-free -h
-
-# Reduce worker count (in configs/dask/64gb-production.yml)
-# Change n_workers from 6 to 4
-
-# Reduce partition size (in DaskDataGatherer.py)
-# Change blocksize from 64MB to 32MB
+git status
+git diff --stat
 ```
-
-#### 2. Slow Performance
-
-**Symptom:** Pipeline takes >10 minutes for 15M rows
-**Solution:**
-```bash
-# Check Dask dashboard for bottlenecks
-# Common causes:
-# - Too many small partitions → increase blocksize
-# - Disk I/O bottleneck → use faster SSD
-# - Insufficient workers → increase n_workers (if RAM allows)
-
-# Enable profiling
-python scripts/profile_pipeline.py <config.json>
-```
-
-#### 3. Cache Misses
-
-**Symptom:** Cache hit rate <70%
-**Solution:**
-```bash
-# Check cache metadata
-python scripts/monitor_cache_health.py
-
-# Common causes:
-# - Non-deterministic parameters (timestamps, random values)
-# - Cache directory deleted
-# - Config hash collisions (very rare)
-
-# Fix: Use deterministic random seeds in configs
-"random_seed": 42  # Always use same seed for reproducibility
-```
-
-#### 4. Import Errors
-
-**Symptom:** `ModuleNotFoundError: No module named 'dask'`
-**Solution:**
-```bash
-# Verify virtual environment is activated
-source .venv/bin/activate
-
-# Reinstall dependencies
-pip install -r requirements.txt --force-reinstall
-
-# Verify installation
-python validate_dask_setup.py
-```
-
-#### 5. CI/CD Pipeline Failures
-
-**Common CI/CD Issues and Solutions:**
-
-**Issue: Python version errors in CI**
-- **Symptom:** Tests fail with syntax errors or `SyntaxError: invalid syntax` on Python 3.8 or 3.9
-- **Solution:** This project requires Python 3.10+. Check your `.github/workflows/test.yml` to ensure it only uses Python 3.10, 3.11, and 3.12
-
-**Issue: Missing fixture errors**
-- **Symptom:** `fixture 'someDict' not found` in test output
-- **Solution:** Ensure `conftest.py` contains all required fixtures. This was fixed in commit c8b1ac3
-
-**Issue: Docker build fails with missing validation script**
-- **Symptom:** `COPY failed: file not found in build context` or `validate_dask_setup.py: not found`
-- **Solution:** Check `.dockerignore` file - ensure `!validate_dask_setup.py` exception is present before the `validate_*.py` exclusion pattern (fixed in commit b88dd7b)
-
-**Issue: Indentation/syntax errors in validation scripts**
-- **Symptom:** `IndentationError` or `SyntaxError` in `validate_dask_clean_with_timestamps.py`
-- **Solution:** This was a formatting issue fixed in commit fddfa5e. Ensure all Python files have consistent 4-space indentation
-
-**Issue: Import errors for Helpers or Decorators modules**
-- **Symptom:** `ModuleNotFoundError: No module named 'Helpers'` or `'Decorators'`
-- **Solution:** Ensure `Helpers/__init__.py` and `Decorators/__init__.py` exist (even if empty). Fixed in commits 919d8ad and 465e016
-
-For more detailed troubleshooting, see the [Troubleshooting Guide](docs/Troubleshooting_Guide.md).
-
-## Advanced Usage
-
-### Custom Attack Methods
-
-Extend `DaskConnectedDrivingAttacker` to implement custom attack patterns:
-
-```python
-from Generator.Attackers.DaskConnectedDrivingAttacker import DaskConnectedDrivingAttacker
-
-class MyCustomAttacker(DaskConnectedDrivingAttacker):
-    def my_custom_attack(self, df, min_dist, max_dist):
-        """Implement your custom attack logic."""
-        # Your attack logic here
-        return modified_df
-
-# Use in pipeline
-attacker = MyCustomAttacker(...)
-result_df = attacker.my_custom_attack(df, 10, 20)
-```
-
-### Custom Classifiers
-
-Add custom scikit-learn classifiers to the pipeline:
-
-```python
-from sklearn.svm import SVC
-from MachineLearning.DaskPipelineRunner import DaskPipelineRunner, DEFAULT_CLASSIFIER_INSTANCES
-
-# Add SVM to default classifiers
-custom_classifiers = DEFAULT_CLASSIFIER_INSTANCES + [SVC(kernel='rbf')]
-
-# Modify DaskPipelineRunner to use custom classifiers
-# (requires editing DaskPipelineRunner.py or subclassing)
-```
-
-### Batch Processing
-
-Process multiple configs in parallel:
-
-```python
-import glob
-from MachineLearning.DaskPipelineRunner import DaskPipelineRunner
-
-config_files = glob.glob("MClassifierPipelines/configs/*.json")
-
-for config_file in config_files:
-    print(f"Running {config_file}...")
-    runner = DaskPipelineRunner.from_config(config_file)
-    results = runner.run()
-    print(f"Completed {config_file}")
-```
-
-## Migration from Pandas
-
-If you have existing pandas-based pipelines:
-
-### 1. Config Migration
-Convert old pipeline scripts to JSON configs:
-- Extract parameters (distance, attack type, columns)
-- Create JSON config file
-- Test with `DaskPipelineRunner.from_config()`
-
-### 2. Code Migration
-Replace pandas operations with Dask equivalents:
-
-```python
-# Old (pandas)
-df = pd.read_csv("data.csv")
-df = df[df["latitude"] > 40]
-result = df.compute()  # Error: pandas doesn't have .compute()
-
-# New (Dask)
-df = dd.read_csv("data.csv")
-df = df[df["latitude"] > 40]
-result = df.compute()  # OK: Dask executes lazy operations
-```
-
-### 3. Memory Configuration
-Adjust worker memory limits for your system:
-- 64GB → 6 workers × 8GB = 48GB (recommended)
-- 128GB → 12 workers × 8GB = 96GB
-- Edit `configs/dask/64gb-production.yml`
 
 ## Contributing
 
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Commit changes (`git commit -am 'Add my feature'`)
-4. Push to branch (`git push origin feature/my-feature`)
-5. Create Pull Request
+Research contributions and reproducibility fixes are welcome.
 
-**Development Setup:**
+Recommended workflow:
+
 ```bash
-# Install dev dependencies
-pip install -r requirements.txt
-pip install pytest pytest-cov black flake8
-
-# Run tests
-pytest Test/ -v --cov
-
-# Format code
-black .
-
-# Lint
-flake8 .
+git checkout -b feature/descriptive-name
+git add .
+git commit -m "Describe the research or pipeline change"
+git push -u origin HEAD
 ```
 
-## Documentation
+Please include:
 
-Full documentation is available at:
-- **Online Docs:** http://aaron777collins.github.io/ConnectedDrivingPipelineV4
-- **Config Examples:** [MClassifierPipelines/configs/README.md](MClassifierPipelines/configs/README.md)
-- **API Reference:** [docs/API_Reference.md](docs/API_Reference.md)
-- **Performance Reports:**
-  - [DASK_BOTTLENECK_PROFILING_REPORT.md](DASK_BOTTLENECK_PROFILING_REPORT.md)
-  - [MEMORY_OPTIMIZATION_REPORT_TASK49.md](MEMORY_OPTIMIZATION_REPORT_TASK49.md)
-  - [TASK50_CACHE_HIT_RATE_OPTIMIZATION_REPORT.md](TASK50_CACHE_HIT_RATE_OPTIMIZATION_REPORT.md)
+- the motivation for the change
+- affected config directories
+- whether cached results are invalidated
+- validation commands
+- smoke-test results
+- expected experiment counts
 
-## License
+## Attribution
 
-[Include license information here]
+### Aaron Collins
 
-## Contact
+Aaron Collins started the original ConnectedDrivingPipelineV4 work and its earlier pandas/Dask pipeline direction. This repository exists as a fork and continuation of that foundation.
 
-- **Repository:** https://github.com/aaron777collins/ConnectedDrivingPipelineV4
-- **Issues:** https://github.com/aaron777collins/ConnectedDrivingPipelineV4/issues
-- **Documentation:** http://aaron777collins.github.io/ConnectedDrivingPipelineV4
+### Joshua Picchioni
+
+Joshua Picchioni developed and validated the current thesis-oriented research fork, including major work on:
+
+- Wyoming April 2021 dataset processing
+- signed local-coordinate handling
+- vehicle-level attacker assignment
+- vehicle-disjoint evaluation
+- deterministic RPO/CPO generation
+- trajectory-consistency features
+- cache isolation and configuration hashing
+- model-boundary feature selection
+- runtime audits
+- large Slurm experiment sweeps
+- under-the-radar displacement testing
+- natural trajectory-residual analysis
+- consolidated result extraction
+- permutation feature-importance tooling
+- thesis result interpretation and documentation
 
 ## Acknowledgments
 
-This Dask migration was completed as part of a comprehensive performance optimization effort. See [COMPREHENSIVE_DASK_MIGRATION_PLAN_PROGRESS.md](COMPREHENSIVE_DASK_MIGRATION_PLAN_PROGRESS.md) for full migration details and progress tracking.
+This work uses data derived from the Wyoming Connected Vehicle Pilot and open-source software including Dask, pandas, NumPy, scikit-learn, and Apache Arrow.
 
-**Key Contributors:**
-- Original pandas framework: Aaron Collins
-- Dask migration and optimization: Automated agent (Claude/Anthropic)
-- Testing and validation: Comprehensive test suite (127+ tests)
+Development and debugging have also been assisted by automated coding and analysis tools. All final research decisions, experiment definitions, validation steps, and thesis interpretations remain the responsibility of the project authors.
 
----
+## License
 
-**Status:** Production Ready ✅
-**Last Updated:** 2026-01-18
-**Version:** 4.0 (Dask Migration Complete)
+No license should be assumed unless a license file is present in the repository. Add or update `LICENSE` before distributing or accepting external contributions under specific terms.
